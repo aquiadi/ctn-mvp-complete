@@ -169,8 +169,6 @@
       currentUser = await checkAuth();
       if (currentUser) {
         document.getElementById('nav-user').innerHTML = `${currentUser.email} <span style="opacity:0.6;margin-left:4px;">(${currentUser.role})</span>`;
-        document.getElementById('nav-login').style.display = 'none';
-        document.getElementById('nav-logout').style.display = 'inline-block';
       }
       loadListings();
     }
