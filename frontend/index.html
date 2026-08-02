@@ -162,6 +162,14 @@
 
     .hero {
       padding: 4rem 0 2.5rem;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2.5rem;
+      align-items: start;
+    }
+
+    .hero-text {
+      /* left column */
     }
 
     .hero h1 {
@@ -211,6 +219,124 @@
     .hero-live strong {
       font-weight: 500;
       color: var(--text);
+    }
+
+    /* ── CREDITS BROWSER (hero right) ──────────────── */
+
+    .credits-panel {
+      background: var(--card);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .credits-panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.875rem 1.15rem;
+      border-bottom: 1px solid var(--border2);
+    }
+
+    .credits-panel-title {
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text3);
+    }
+
+    .credits-panel-count {
+      font-size: 10px;
+      color: var(--text3);
+    }
+
+    .credits-list {
+      /* container for items */
+    }
+
+    .credit-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.6rem 1.15rem;
+      border-bottom: 1px solid var(--border2);
+      font-size: 12px;
+      transition: background 0.12s;
+      cursor: pointer;
+    }
+
+    .credit-row:last-child { border-bottom: none; }
+    .credit-row:hover { background: var(--bg2); }
+
+    .credit-row-left {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+    }
+
+    .credit-row-id {
+      font-weight: 500;
+      color: var(--green);
+      font-size: 12px;
+    }
+
+    .credit-row-date {
+      font-size: 10px;
+      color: var(--text3);
+    }
+
+    .credit-row-kwh {
+      font-size: 11px;
+      color: var(--text2);
+      text-align: right;
+    }
+
+    .credits-panel-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.6rem 1.15rem;
+      border-top: 1px solid var(--border2);
+      background: var(--bg);
+    }
+
+    .credits-panel-footer span {
+      font-size: 10px;
+      color: var(--text3);
+    }
+
+    .credits-nav {
+      display: flex;
+      gap: 4px;
+    }
+
+    .credits-nav button {
+      font-size: 10px;
+      padding: 3px 10px;
+      border-radius: var(--radius-sm);
+      font-family: var(--mono);
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text2);
+      transition: all 0.12s;
+    }
+
+    .credits-nav button:hover:not(:disabled) {
+      background: var(--bg2);
+      color: var(--text);
+    }
+
+    .credits-nav button:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+
+    .credit-row-hint {
+      font-size: 9px;
+      color: var(--text3);
+      padding: 0.35rem 1.15rem 0.6rem;
+      text-align: center;
     }
 
     /* ── STAT CARDS ────────────────────────────────── */
@@ -576,6 +702,13 @@
 
     /* ── RESPONSIVE ────────────────────────────────── */
 
+    @media (max-width: 768px) {
+      .hero {
+        grid-template-columns: 1fr;
+        gap: 1.5rem;
+      }
+    }
+
     @media (max-width: 640px) {
       nav { padding: 1rem 1.25rem; }
       .wrap { padding: 0 1.25rem; }
@@ -638,15 +771,36 @@
   <!-- ═══ HERO ═══ -->
   <div class="wrap">
     <section class="hero fade-up" id="hero-section">
-      <h1>Verified solar carbon credits,<br><em>on-chain.</em></h1>
-      <p class="hero-sub">
-        Installers earn credits from real solar generation. Buyers purchase verified offsets.
-        Every credit is backed by metered kWh data on IPFS and minted on Polygon — not promises.
-      </p>
-      <div class="hero-live" id="hero-live">
-        <div class="hero-live-dot"></div>
-        <span id="hero-credits-count">—</span> credits verified across
-        <strong id="hero-days">—</strong> days of generation
+      <div class="hero-text">
+        <h1>Verified solar carbon credits,<br><em>on-chain.</em></h1>
+        <p class="hero-sub">
+          Installers earn credits from real solar generation. Buyers purchase verified offsets.
+          Every credit is backed by metered kWh data on IPFS and minted on Polygon — not promises.
+        </p>
+        <div class="hero-live" id="hero-live">
+          <div class="hero-live-dot"></div>
+          <span id="hero-credits-count">—</span> credits verified across
+          <strong id="hero-days">—</strong> days of generation
+        </div>
+      </div>
+
+      <!-- Credits browser -->
+      <div class="credits-panel" id="credits-panel">
+        <div class="credits-panel-header">
+          <span class="credits-panel-title">Verified credits</span>
+          <span class="credits-panel-count" id="credits-total">loading…</span>
+        </div>
+        <div class="credits-list" id="credits-list">
+          <div style="padding:2rem 1.15rem;text-align:center;font-size:11px;color:var(--text3);">Loading credits…</div>
+        </div>
+        <div class="credit-row-hint">Click any credit ID to verify it on-chain ↓</div>
+        <div class="credits-panel-footer">
+          <span id="credits-page-info">—</span>
+          <div class="credits-nav">
+            <button onclick="creditsPage(-1)" id="credits-prev" disabled>← prev</button>
+            <button onclick="creditsPage(1)" id="credits-next">next →</button>
+          </div>
+        </div>
       </div>
     </section>
   </div>
@@ -864,11 +1018,20 @@
       return r.json();
     }
 
+    let creditsCurPage = 1;
+    const CREDITS_PAGE_SIZE = 8;
+    let creditsTotalCount = 0;
+
     async function init() {
       try {
-        const stats = await api('/stats');
+        const [stats, creditsData] = await Promise.all([
+          api('/stats'),
+          api('/credits?page=1&limit=' + CREDITS_PAGE_SIZE)
+        ]);
+
         populateStats(stats);
         populateProof(stats);
+        populateCredits(creditsData);
 
         document.getElementById('live-badge').textContent = 'live';
         document.getElementById('live-badge').style.background = 'var(--green-light)';
@@ -891,7 +1054,6 @@
 
       document.getElementById('hero-credits-count').textContent = (stats.total_credits || 0).toLocaleString('en-IN');
 
-      // Calculate days from period if available
       if (stats.period_start && stats.period_end) {
         const start = new Date(stats.period_start);
         const end = new Date(stats.period_end);
@@ -908,6 +1070,55 @@
       document.getElementById('proof-device').textContent = stats.device_id || '—';
       document.getElementById('proof-period').textContent =
         (stats.period_start || '').slice(0, 10) + ' → ' + (stats.period_end || '').slice(0, 10);
+    }
+
+    function populateCredits(data) {
+      creditsTotalCount = data.total || 0;
+      const list = document.getElementById('credits-list');
+      const totalPages = data.pages || Math.ceil(creditsTotalCount / CREDITS_PAGE_SIZE);
+
+      document.getElementById('credits-total').textContent =
+        creditsTotalCount.toLocaleString('en-IN') + ' total';
+      document.getElementById('credits-page-info').textContent =
+        `page ${creditsCurPage} of ${totalPages}`;
+      document.getElementById('credits-prev').disabled = creditsCurPage <= 1;
+      document.getElementById('credits-next').disabled = creditsCurPage >= totalPages;
+
+      if (!data.credits || data.credits.length === 0) {
+        list.innerHTML = '<div style="padding:1.5rem 1.15rem;text-align:center;font-size:11px;color:var(--text3);">No credits found.</div>';
+        return;
+      }
+
+      list.innerHTML = data.credits.map(c => `
+        <div class="credit-row" onclick="pickCredit(${c.credit_id})" title="Click to verify #${c.credit_id}">
+          <div class="credit-row-left">
+            <span class="credit-row-id">#${c.credit_id}</span>
+            <span class="credit-row-date">${(c.period_end || c.timestamp || '').slice(0, 10)}</span>
+          </div>
+          <span class="credit-row-kwh">${(c.total_kwh || 0).toFixed(1)} kWh</span>
+        </div>
+      `).join('');
+    }
+
+    async function creditsPage(dir) {
+      const totalPages = Math.ceil(creditsTotalCount / CREDITS_PAGE_SIZE);
+      const next = creditsCurPage + dir;
+      if (next < 1 || next > totalPages) return;
+      creditsCurPage = next;
+      try {
+        const data = await api(`/credits?page=${creditsCurPage}&limit=${CREDITS_PAGE_SIZE}`);
+        populateCredits(data);
+      } catch (e) { console.error(e); }
+    }
+
+    function pickCredit(id) {
+      const input = document.getElementById('verify-id');
+      input.value = id;
+      // Scroll to verify section
+      input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      input.focus();
+      // Auto-trigger verify
+      setTimeout(() => verifyCredit(), 300);
     }
 
     async function verifyCredit() {
@@ -951,6 +1162,14 @@
       };
       populateStats(demo);
       populateProof(demo);
+
+      // Demo credits for offline
+      const demoCredits = Array.from({ length: 8 }, (_, i) => ({
+        credit_id: i + 1,
+        total_kwh: 58.65 + (Math.random() * 50),
+        period_end: '2020-05-' + String(15 + i).padStart(2, '0') + ' 12:00:00'
+      }));
+      populateCredits({ credits: demoCredits, total: 1684, pages: 211 });
     }
 
     init();
