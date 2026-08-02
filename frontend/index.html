@@ -665,20 +665,35 @@
 
       <!-- LEFT: MINT + VERIFY -->
       <div>
-        <!-- MINT -->
-        <div class="mint-section">
-          <div class="mint-title">Mint a credit on-chain</div>
-          <div class="mint-desc">Select a credit ID and enter a recipient wallet address. The credit will be minted on
-            Polygon Amoy and permanently linked to its IPFS data certificate.</div>
-          <div class="input-row">
-            <input type="number" id="mint-credit-id" placeholder="Credit ID (e.g. 1)" min="1"
-              style="max-width:140px;" />
-            <input type="text" id="mint-recipient" placeholder="0x... recipient wallet" />
+        <!-- CTAS & HOW IT WORKS -->
+        <div class="card" style="margin-bottom: 1.25rem;">
+          <div class="card-title">How it works</div>
+          <div style="font-size: 13px; color: var(--text2); margin-bottom: 1rem;">
+            CTN directly connects solar panel owners in India with global buyers seeking verified carbon offsets.
           </div>
-          <button class="btn btn-green" onclick="mintCredit()" id="mint-btn">Mint credit →</button>
-          <div class="result-box" id="mint-result">
-            <div class="result-title">✓ Credit minted successfully</div>
-            <div id="mint-result-body"></div>
+          <div style="display: flex; flex-direction: column; gap: 12px;">
+            <div style="background: var(--bg2); padding: 1rem; border-radius: var(--radius-sm);">
+              <div style="font-weight: 500; font-size: 14px; margin-bottom: 4px; display: flex; align-items: center; gap: 8px;">
+                <span style="background: var(--green); color: white; width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; font-size: 10px;">1</span> Generate
+              </div>
+              <div style="font-size: 12px; color: var(--text3);">Smart meters track solar energy generation in real-time.</div>
+            </div>
+            <div style="background: var(--bg2); padding: 1rem; border-radius: var(--radius-sm);">
+              <div style="font-weight: 500; font-size: 14px; margin-bottom: 4px; display: flex; align-items: center; gap: 8px;">
+                <span style="background: var(--green); color: white; width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; font-size: 10px;">2</span> Verify
+              </div>
+              <div style="font-size: 12px; color: var(--text3);">Data is securely logged to IPFS and minted as credits on Polygon.</div>
+            </div>
+            <div style="background: var(--bg2); padding: 1rem; border-radius: var(--radius-sm);">
+              <div style="font-weight: 500; font-size: 14px; margin-bottom: 4px; display: flex; align-items: center; gap: 8px;">
+                <span style="background: var(--green); color: white; width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; font-size: 10px;">3</span> Trade
+              </div>
+              <div style="font-size: 12px; color: var(--text3);">Installers sell verified credits on the marketplace to buyers.</div>
+            </div>
+          </div>
+          <div style="display: flex; gap: 10px; margin-top: 1.5rem;">
+            <a href="/login?mode=signup&role=installer" class="btn btn-green" style="flex:1; text-align: center; text-decoration: none;">Join as Installer</a>
+            <a href="/marketplace" class="btn btn-outline" style="flex:1; text-align: center; text-decoration: none; color: var(--text);">Browse Marketplace</a>
           </div>
         </div>
 
@@ -958,44 +973,7 @@
       } catch (e) { console.error(e); }
     }
 
-    async function mintCredit() {
-      const creditId = document.getElementById('mint-credit-id').value;
-      const recipient = document.getElementById('mint-recipient').value.trim();
 
-      if (!creditId || !recipient) {
-        alert('Please enter both a credit ID and recipient wallet address.');
-        return;
-      }
-
-      const btn = document.getElementById('mint-btn');
-      btn.disabled = true;
-      btn.textContent = 'Minting...';
-
-      const resultBox = document.getElementById('mint-result');
-      const resultBody = document.getElementById('mint-result-body');
-      resultBox.classList.remove('visible');
-
-      try {
-        const data = await api(`/mint/${creditId}?recipient=${encodeURIComponent(recipient)}`, { method: 'POST' });
-
-        document.getElementById('verify-id').value = data.on_chain_id;
-
-        resultBody.innerHTML = `
-        <div class="result-row"><span>On-Chain ID</span><span>#${data.on_chain_id}</span></div>
-        <div class="result-row"><span>Database ID</span><span>#${data.credit_id}</span></div>
-        <div class="result-row"><span>Recipient</span><span>${(data.recipient || '').slice(0, 10)}...${(data.recipient || '').slice(-4)}</span></div>
-        <div class="result-row"><span>IPFS hash</span><span>${(data.individual_ipfs_hash || '').slice(0, 12)}...</span></div>
-        <div class="result-row"><span>Transaction</span><a href="${data.polygonscan}" target="_blank">${(data.tx_hash || '').slice(0, 10)}... ↗</a></div>
-      `;
-        resultBox.classList.add('visible');
-
-      } catch (e) {
-        alert('Mint failed. Check Railway logs for details.\n\n' + e.message);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = 'Mint credit →';
-      }
-    }
 
     async function verifyCredit() {
       const creditId = document.getElementById('verify-id').value;

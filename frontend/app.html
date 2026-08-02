@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CTN — My Dashboard</title>
+  <meta name="description" content="Your solar carbon credit dashboard. Track generation, monitor credits earned, and sell when you reach the threshold.">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f5f2eb; --bg2: #eceadf; --card: #ffffff;
+      --border: rgba(0,0,0,0.1); --border2: rgba(0,0,0,0.06);
+      --text: #1a1a16; --text2: #6b6b5e; --text3: #9e9e8f;
+      --green: #2d6a4f; --green-light: #d8f3dc; --green-mid: #52b788;
+      --amber: #b5451b; --amber-light: #fde8d8;
+      --blue: #1d4e89; --blue-light: #dbeafe;
+      --red: #b91c1c; --red-light: #fee2e2;
+      --mono: 'DM Mono', monospace; --serif: 'Fraunces', serif;
+      --radius: 12px; --radius-sm: 8px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: var(--mono); background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.6; }
+
+    /* NAV */
+    nav {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 1rem 1.5rem; border-bottom: 1px solid var(--border);
+      background: var(--bg); position: sticky; top: 0; z-index: 100;
+    }
+    .nav-left { display: flex; align-items: center; gap: 10px; }
+    .nav-logo { font-family: var(--serif); font-size: 1.15rem; font-weight: 500; letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--text); }
+    .nav-logo-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green-mid); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:0.6; transform:scale(1.2); } }
+    .nav-links { display: flex; gap: 4px; }
+    .nav-link { font-size: 12px; padding: 0.4rem 0.75rem; border-radius: var(--radius-sm); color: var(--text2); text-decoration: none; transition: all 0.15s; }
+    .nav-link:hover { color: var(--text); background: var(--bg2); }
+    .nav-link.active { color: var(--text); background: var(--bg2); }
+    .nav-right { display: flex; align-items: center; gap: 10px; }
+    .nav-user { font-size: 11px; color: var(--text3); }
+    .btn-sm { font-size: 11px; padding: 0.35rem 0.75rem; border-radius: var(--radius-sm); font-family: var(--mono); cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text2); transition: all 0.15s; }
+    .btn-sm:hover { color: var(--text); border-color: var(--text3); }
+
+    /* MAIN */
+    .main { max-width: 900px; margin: 0 auto; padding: 1.5rem; }
+
+    /* GREETING */
+    .greeting { margin-bottom: 1.5rem; }
+    .greeting-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text3); margin-bottom: 0.35rem; }
+    .greeting h1 { font-family: var(--serif); font-size: clamp(1.5rem, 4vw, 2.25rem); font-weight: 300; line-height: 1.15; letter-spacing: -0.02em; }
+    .greeting h1 em { font-style: italic; color: var(--green); }
+
+    /* WALLET NOTICE */
+    .notice { border-radius: var(--radius-sm); padding: 0.75rem 1rem; font-size: 12px; margin-bottom: 1rem; display: flex; align-items: center; gap: 8px; line-height: 1.4; }
+    .notice-amber { background: var(--amber-light); border: 1px solid rgba(181,69,27,0.2); color: var(--amber); }
+    .notice-green { background: var(--green-light); border: 1px solid rgba(45,106,79,0.2); color: var(--green); }
+    .notice a { color: inherit; font-weight: 500; }
+
+    /* STATS */
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 1.25rem; }
+    .stat-card { background: var(--card); border: 1px solid var(--border2); border-radius: var(--radius); padding: 1.1rem; transition: border-color 0.2s; }
+    .stat-card:hover { border-color: var(--border); }
+    .stat-label { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); margin-bottom: 0.4rem; }
+    .stat-value { font-family: var(--serif); font-size: 1.75rem; font-weight: 300; line-height: 1; color: var(--text); margin-bottom: 0.15rem; }
+    .stat-value.green { color: var(--green); }
+    .stat-value.amber { color: var(--amber); }
+    .stat-unit { font-size: 10px; color: var(--text3); }
+
+    /* SELL THRESHOLD */
+    .threshold-card { background: var(--card); border: 1px solid var(--border2); border-radius: var(--radius); padding: 1.25rem; margin-bottom: 1.25rem; }
+    .threshold-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; }
+    .threshold-title { font-family: var(--serif); font-size: 1.1rem; font-weight: 400; }
+    .threshold-status { font-size: 11px; padding: 3px 10px; border-radius: 20px; font-weight: 500; }
+    .threshold-status.eligible { background: var(--green-light); color: var(--green); }
+    .threshold-status.pending { background: var(--amber-light); color: var(--amber); }
+    .progress-track { background: var(--bg2); border-radius: var(--radius-sm); height: 10px; overflow: hidden; margin-bottom: 0.5rem; }
+    .progress-fill { height: 100%; background: var(--green-mid); border-radius: var(--radius-sm); transition: width 1s ease; }
+    .progress-label { font-size: 11px; color: var(--text2); }
+    .btn-sell { padding: 0.6rem 1.5rem; border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; font-weight: 500; cursor: pointer; border: none; background: var(--green); color: white; transition: opacity 0.2s; margin-top: 0.75rem; }
+    .btn-sell:hover { opacity: 0.85; }
+    .btn-sell:disabled { opacity: 0.35; cursor: not-allowed; }
+    .sell-note { font-size: 11px; color: var(--text3); margin-top: 0.5rem; }
+
+    /* CREDITS TABLE */
+    .card { background: var(--card); border: 1px solid var(--border2); border-radius: var(--radius); padding: 1.25rem; margin-bottom: 1.25rem; }
+    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+    .card-title { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text3); }
+    .credit-item { display: flex; align-items: center; justify-content: space-between; padding: 0.65rem 0; border-bottom: 1px solid var(--border2); font-size: 12px; }
+    .credit-item:last-child { border-bottom: none; }
+    .credit-id { font-size: 10px; color: var(--text3); margin-bottom: 2px; }
+    .credit-kwh { font-weight: 500; color: var(--text); }
+    .credit-co2 { font-size: 11px; color: var(--text2); }
+    .badge { font-size: 9px; padding: 2px 8px; border-radius: 20px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
+    .badge-verified { background: var(--green-light); color: var(--green); }
+    .badge-pending { background: var(--amber-light); color: var(--amber); }
+    .badge-listed { background: var(--blue-light); color: var(--blue); }
+    .badge-sold { background: #f0fdf4; color: #166534; }
+    .badge-retired { background: var(--bg2); color: var(--text3); }
+    .badge-reserved { background: #fef3c7; color: #92400e; }
+
+    /* PAGINATION */
+    .pagination { display: flex; gap: 8px; align-items: center; margin-top: 0.75rem; }
+    .btn-page { font-size: 11px; padding: 0.35rem 0.75rem; border-radius: var(--radius-sm); font-family: var(--mono); cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text2); transition: all 0.15s; }
+    .btn-page:hover:not(:disabled) { color: var(--text); border-color: var(--text3); }
+    .btn-page:disabled { opacity: 0.3; cursor: not-allowed; }
+    .page-info { font-size: 10px; color: var(--text3); }
+
+    /* EMPTY STATE */
+    .empty-state { text-align: center; padding: 3rem 1rem; }
+    .empty-icon { font-size: 2rem; margin-bottom: 0.75rem; opacity: 0.5; }
+    .empty-title { font-family: var(--serif); font-size: 1.1rem; font-weight: 400; margin-bottom: 0.5rem; }
+    .empty-desc { font-size: 12px; color: var(--text2); max-width: 300px; margin: 0 auto; line-height: 1.5; }
+
+    /* FOOTER */
+    footer { border-top: 1px solid var(--border); padding: 1.25rem 1.5rem; font-size: 10px; color: var(--text3); text-align: center; }
+
+    /* SELL MODAL */
+    .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.4); z-index: 200; align-items: center; justify-content: center; padding: 1.5rem; }
+    .modal-overlay.visible { display: flex; }
+    .modal { background: var(--card); border-radius: var(--radius); padding: 1.5rem; max-width: 420px; width: 100%; max-height: 80vh; overflow-y: auto; }
+    .modal-title { font-family: var(--serif); font-size: 1.25rem; font-weight: 400; margin-bottom: 0.5rem; }
+    .modal-desc { font-size: 12px; color: var(--text2); margin-bottom: 1.25rem; line-height: 1.5; }
+    .modal-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 1.25rem; }
+    .btn-cancel { padding: 0.5rem 1rem; border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text2); }
+
+    /* DEVICES */
+    .device-item { display: flex; align-items: center; justify-content: space-between; padding: 0.65rem 0; border-bottom: 1px solid var(--border2); font-size: 12px; }
+    .device-item:last-child { border-bottom: none; }
+    .device-id { font-weight: 500; }
+    .device-meta { font-size: 11px; color: var(--text2); }
+
+    @keyframes fadeUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
+    .fade-up { animation: fadeUp 0.4s ease forwards; }
+    .fade-up-2 { animation-delay: 0.1s; opacity: 0; }
+    .fade-up-3 { animation-delay: 0.2s; opacity: 0; }
+    .fade-up-4 { animation-delay: 0.3s; opacity: 0; }
+
+    /* LOADING SKELETON */
+    .skeleton { background: linear-gradient(90deg, var(--bg2) 25%, var(--bg) 50%, var(--bg2) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 4px; }
+    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+    /* MOBILE */
+    @media (max-width: 600px) {
+      .nav-links { display: none; }
+      .stats-grid { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-left">
+      <a href="/" class="nav-logo"><div class="nav-logo-dot"></div> CTN</a>
+      <div class="nav-links">
+        <a href="/app" class="nav-link active">Dashboard</a>
+        <a href="/app/history" class="nav-link">History</a>
+      </div>
+    </div>
+    <div class="nav-right">
+      <span class="nav-user" id="nav-user">—</span>
+      <button class="btn-sm" onclick="logout()" id="logout-btn">Sign out</button>
+    </div>
+  </nav>
+
+  <div class="main" id="main-content">
+    <!-- Content loads dynamically -->
+    <div class="greeting fade-up">
+      <p class="greeting-label">Installer Dashboard</p>
+      <h1 id="greeting-title">Loading<br>your <em>dashboard...</em></h1>
+    </div>
+    <div class="stats-grid fade-up fade-up-2">
+      <div class="stat-card"><div class="skeleton" style="height:20px;width:60%;margin-bottom:8px;"></div><div class="skeleton" style="height:36px;width:80%;"></div></div>
+      <div class="stat-card"><div class="skeleton" style="height:20px;width:60%;margin-bottom:8px;"></div><div class="skeleton" style="height:36px;width:80%;"></div></div>
+      <div class="stat-card"><div class="skeleton" style="height:20px;width:60%;margin-bottom:8px;"></div><div class="skeleton" style="height:36px;width:80%;"></div></div>
+      <div class="stat-card"><div class="skeleton" style="height:20px;width:60%;margin-bottom:8px;"></div><div class="skeleton" style="height:36px;width:80%;"></div></div>
+    </div>
+  </div>
+
+  <!-- SELL MODAL -->
+  <div class="modal-overlay" id="sell-modal">
+    <div class="modal">
+      <div class="modal-title">List credits for sale</div>
+      <div class="modal-desc" id="sell-modal-desc">Select which verified credits to list on the marketplace.</div>
+      <div id="sell-modal-body"></div>
+      <div id="sell-error" class="error-msg" style="display:none;background:var(--red-light);border:1px solid rgba(185,28,28,0.2);border-radius:var(--radius-sm);padding:0.65rem;font-size:12px;color:var(--red);margin-top:0.75rem;"></div>
+      <div class="modal-footer">
+        <button class="btn-cancel" onclick="closeSellModal()">Cancel</button>
+        <button class="btn-sell" id="sell-confirm-btn" onclick="confirmSell()">List for sale →</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>CTN · Climate Trust Network · Simulated data from Patna, Bihar, India</footer>
+
+  <script>
+    const API = window.location.origin;
+    let dashboardData = null;
+    let creditsData = null;
+    let currentPage = 1;
+    const PAGE_SIZE = 15;
+
+    // ── Auth check ──
+    async function checkAuth() {
+      try {
+        const r = await fetch(API + '/api/auth/me', { credentials: 'include' });
+        if (!r.ok) throw new Error('Not auth');
+        const data = await r.json();
+        if (data.user.role !== 'installer') {
+          window.location.href = '/login';
+          return null;
+        }
+        return data.user;
+      } catch(e) {
+        window.location.href = '/login?return=/app';
+        return null;
+      }
+    }
+
+    async function logout() {
+      await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'include' });
+      window.location.href = '/login';
+    }
+
+    // ── Init ──
+    async function init() {
+      const user = await checkAuth();
+      if (!user) return;
+
+      document.getElementById('nav-user').textContent = user.email;
+
+      try {
+        const [dash, creds] = await Promise.all([
+          fetch(API + '/api/installer/dashboard', { credentials: 'include' }).then(r => r.json()),
+          fetch(API + '/api/installer/credits?page=1&limit=' + PAGE_SIZE, { credentials: 'include' }).then(r => r.json())
+        ]);
+        dashboardData = dash;
+        creditsData = creds;
+        renderDashboard(dash, creds);
+      } catch(e) {
+        console.error('Dashboard error:', e);
+        document.getElementById('main-content').innerHTML = `
+          <div class="empty-state">
+            <div class="empty-icon">⚠</div>
+            <div class="empty-title">Could not load dashboard</div>
+            <div class="empty-desc">There was a problem connecting to the server. Please refresh or try again later.</div>
+          </div>`;
+      }
+    }
+
+    function renderDashboard(dash, creds) {
+      const s = dash.stats;
+      const t = dash.sell_threshold;
+      const hasData = s.total_credits > 0;
+
+      let html = `
+        <div class="greeting fade-up">
+          <p class="greeting-label">Installer Dashboard · ${dash.installer.email}</p>
+          <h1>${hasData ? `${s.total_kwh.toLocaleString('en-IN')} kWh<br>of <em>clean energy.</em>` : `Welcome to<br><em>CTN.</em>`}</h1>
+        </div>`;
+
+      // Wallet notice
+      if (!dash.installer.wallet_linked) {
+        html += `<div class="notice notice-amber fade-up">
+          Your credits are held in CTN custody. <a href="#" onclick="alert('Wallet linking coming soon — use MetaMask to sign a verification message.')">Link your wallet</a> to take ownership and enable selling.
+        </div>`;
+      }
+
+      if (!hasData) {
+        html += `
+          <div class="empty-state fade-up fade-up-2" style="padding:4rem 1rem;">
+            <div class="empty-icon">☀</div>
+            <div class="empty-title">No data yet</div>
+            <div class="empty-desc">Your solar panel is registered. Credits will appear here as energy generation data flows in. Check back soon.</div>
+          </div>`;
+        document.getElementById('main-content').innerHTML = html;
+        return;
+      }
+
+      // Stats grid
+      html += `
+        <div class="stats-grid fade-up fade-up-2">
+          <div class="stat-card">
+            <div class="stat-label">Energy generated</div>
+            <div class="stat-value">${s.total_kwh.toLocaleString('en-IN')}</div>
+            <div class="stat-unit">kilowatt-hours</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">CO₂ avoided</div>
+            <div class="stat-value green">${s.total_co2_kg.toLocaleString('en-IN')}</div>
+            <div class="stat-unit">kilograms (${s.total_co2_tonnes} t)</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Credits earned</div>
+            <div class="stat-value">${s.total_credits}</div>
+            <div class="stat-unit">carbon credits</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Estimated value</div>
+            <div class="stat-value amber">₹${s.value_inr.toLocaleString('en-IN')}</div>
+            <div class="stat-unit">$${s.value_usd} USD</div>
+          </div>
+        </div>`;
+
+      // Sell threshold
+      const statusBadge = t.eligible
+        ? '<span class="threshold-status eligible">Ready to sell</span>'
+        : `<span class="threshold-status pending">${t.remaining} more to go</span>`;
+
+      html += `
+        <div class="threshold-card fade-up fade-up-3">
+          <div class="threshold-header">
+            <div class="threshold-title">Sell threshold</div>
+            ${statusBadge}
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" style="width:${Math.min(100, t.progress_pct)}%"></div>
+          </div>
+          <div class="progress-label">
+            ${t.eligible ? 'Threshold reached — ready to sell' : `${t.current} of ${t.required} verified credits · ${t.progress_pct}% complete`}
+          </div>
+          ${t.eligible ? `<button class="btn-sell" onclick="openSellModal()" ${!dash.installer.wallet_linked ? 'disabled' : ''}>
+            ${dash.installer.wallet_linked ? 'List credits for sale →' : 'Link wallet to sell'}
+          </button>` : `<div class="sell-note">Earn ${t.remaining} more verified credit${t.remaining !== 1 ? 's' : ''} to unlock selling.</div>`}
+        </div>`;
+
+      // Credit status summary
+      const cs = dash.credits_by_status;
+      html += `
+        <div class="card fade-up fade-up-3">
+          <div class="card-header">
+            <div class="card-title">Credit status breakdown</div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:12px;">
+            <div style="padding:0.5rem;background:var(--bg2);border-radius:var(--radius-sm);text-align:center;">
+              <div style="font-family:var(--serif);font-size:1.25rem;font-weight:300;">${cs.verified}</div>
+              <div style="font-size:10px;color:var(--text3);">Verified</div>
+            </div>
+            <div style="padding:0.5rem;background:var(--bg2);border-radius:var(--radius-sm);text-align:center;">
+              <div style="font-family:var(--serif);font-size:1.25rem;font-weight:300;">${cs.listed}</div>
+              <div style="font-size:10px;color:var(--text3);">Listed</div>
+            </div>
+            <div style="padding:0.5rem;background:var(--bg2);border-radius:var(--radius-sm);text-align:center;">
+              <div style="font-family:var(--serif);font-size:1.25rem;font-weight:300;">${cs.sold + cs.retired}</div>
+              <div style="font-size:10px;color:var(--text3);">Sold / Retired</div>
+            </div>
+          </div>
+        </div>`;
+
+      // Credits list
+      html += `
+        <div class="card fade-up fade-up-4">
+          <div class="card-header">
+            <div class="card-title">Your credits</div>
+            <div class="page-info" id="page-info"></div>
+          </div>
+          <div id="credits-list"></div>
+          <div class="pagination">
+            <button class="btn-page" onclick="changePage(-1)" id="prev-btn" disabled>← prev</button>
+            <button class="btn-page" onclick="changePage(1)" id="next-btn">next →</button>
+          </div>
+        </div>`;
+
+      // Devices
+      if (dash.devices && dash.devices.length > 0) {
+        html += `
+          <div class="card fade-up fade-up-4">
+            <div class="card-title">Your devices</div>
+            ${dash.devices.map(d => `
+              <div class="device-item">
+                <div>
+                  <div class="device-id">${d.device_id}</div>
+                  <div class="device-meta">${d.location || 'Unknown location'}</div>
+                </div>
+                <span class="badge badge-verified">Active</span>
+              </div>
+            `).join('')}
+          </div>`;
+      }
+
+      document.getElementById('main-content').innerHTML = html;
+      renderCredits(creds);
+    }
+
+    function renderCredits(data) {
+      const list = document.getElementById('credits-list');
+      if (!list) return;
+      if (!data.credits || data.credits.length === 0) {
+        list.innerHTML = '<div style="font-size:12px;color:var(--text3);padding:1rem 0;">No credits found.</div>';
+        return;
+      }
+
+      list.innerHTML = data.credits.map(c => `
+        <div class="credit-item">
+          <div>
+            <div class="credit-id">#${c.credit_id} · ${(c.timestamp || c.period_end || '').slice(0, 10)}</div>
+            <div class="credit-kwh">${(c.total_kwh || 0).toFixed(2)} kWh</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="credit-co2">${(c.co2_avoided_kg || 0).toFixed(1)} kg CO₂</span>
+            <span class="badge badge-${c.status}">${c.status}</span>
+          </div>
+        </div>
+      `).join('');
+
+      const pages = data.pages || 1;
+      const info = document.getElementById('page-info');
+      if (info) info.textContent = `page ${currentPage} of ${pages}`;
+      const prev = document.getElementById('prev-btn');
+      const next = document.getElementById('next-btn');
+      if (prev) prev.disabled = currentPage <= 1;
+      if (next) next.disabled = currentPage >= pages;
+    }
+
+    async function changePage(dir) {
+      const pages = creditsData ? creditsData.pages : 1;
+      const newPage = currentPage + dir;
+      if (newPage < 1 || newPage > pages) return;
+      currentPage = newPage;
+      try {
+        const r = await fetch(API + `/api/installer/credits?page=${currentPage}&limit=${PAGE_SIZE}`, { credentials: 'include' });
+        creditsData = await r.json();
+        renderCredits(creditsData);
+      } catch(e) { console.error(e); }
+    }
+
+    // ── Sell modal ──
+    function openSellModal() {
+      if (!dashboardData) return;
+      const modal = document.getElementById('sell-modal');
+      const body = document.getElementById('sell-modal-body');
+      const verified = dashboardData.credits_by_status.verified;
+
+      body.innerHTML = `
+        <div style="font-size:12px;color:var(--text2);margin-bottom:0.75rem;">
+          You have <strong>${verified}</strong> verified credits available to list.
+          The platform price is <strong>₹415</strong> per credit ($5 USD).
+        </div>
+        <div style="background:var(--bg2);border-radius:var(--radius-sm);padding:1rem;font-size:12px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;align-items:center;">
+            <span>Credits to list</span>
+            <input type="number" id="sell-quantity" min="10" max="${verified}" value="${verified}" style="width: 80px; text-align: right; padding: 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text);" oninput="updateSellValue(this.value, ${verified})">
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span>Price per credit</span><span>₹415</span>
+          </div>
+          <div style="border-top:1px solid var(--border);margin:8px 0;"></div>
+          <div style="display:flex;justify-content:space-between;font-weight:500;">
+            <span>Total listing value</span><span id="sell-total-value">₹${(verified * 415).toLocaleString('en-IN')}</span>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-top:0.5rem;">
+          Listed credits will appear on the marketplace for buyers. You'll receive payment when they're purchased.
+        </div>
+      `;
+      document.getElementById('sell-error').style.display = 'none';
+      modal.classList.add('visible');
+    }
+
+    function updateSellValue(val, maxVal) {
+      let q = parseInt(val) || 0;
+      if (q > maxVal) {
+        q = maxVal;
+        document.getElementById('sell-quantity').value = maxVal;
+      }
+      document.getElementById('sell-total-value').textContent = '₹' + (q * 415).toLocaleString('en-IN');
+    }
+
+    function closeSellModal() {
+      document.getElementById('sell-modal').classList.remove('visible');
+    }
+
+    async function confirmSell() {
+      const btn = document.getElementById('sell-confirm-btn');
+      btn.disabled = true; btn.textContent = 'Listing...';
+      const errEl = document.getElementById('sell-error');
+      errEl.style.display = 'none';
+
+      try {
+        // Fetch all verified credit IDs
+        const r = await fetch(API + '/api/installer/credits?page=1&limit=10000&status_filter=verified', { credentials: 'include' });
+        const data = await r.json();
+        const ids = data.credits.map(c => c.id);
+
+        if (ids.length < 10) {
+          errEl.textContent = `Need at least 10 verified credits. You have ${ids.length}.`;
+          errEl.style.display = 'block';
+          btn.disabled = false; btn.textContent = 'List for sale →';
+          return;
+        }
+
+        const quantity = parseInt(document.getElementById('sell-quantity').value) || 0;
+        if (quantity < 10 || quantity > ids.length) {
+          errEl.textContent = `Please enter a quantity between 10 and ${ids.length}.`;
+          errEl.style.display = 'block';
+          btn.disabled = false; btn.textContent = 'List for sale →';
+          return;
+        }
+
+        const selectedIds = ids.slice(0, quantity);
+
+        const sellR = await fetch(API + '/api/installer/sell', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ credit_ids: selectedIds })
+        });
+        const sellData = await sellR.json();
+        if (!sellR.ok) {
+          errEl.textContent = sellData.detail || 'Failed to list credits.';
+          errEl.style.display = 'block';
+          return;
+        }
+
+        closeSellModal();
+        // Refresh dashboard
+        init();
+      } catch(e) {
+        errEl.textContent = 'Network error. Please try again.';
+        errEl.style.display = 'block';
+      } finally {
+        btn.disabled = false; btn.textContent = 'List for sale →';
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

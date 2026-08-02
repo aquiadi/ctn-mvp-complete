@@ -3,3 +3,9 @@ uvicorn
 requests
 web3
 python-dotenv
+aiosqlite
+databases[sqlite]
+python-jose[cryptography]
+passlib[bcrypt]
+slowapi
+eth-account
