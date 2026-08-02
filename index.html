@@ -1,0 +1,1071 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CTN — Climate Trust Network</title>
+  <link
+    href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,wght@0,300;0,400;0,500;1,300&display=swap"
+    rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f5f2eb;
+      --bg2: #eceadf;
+      --card: #ffffff;
+      --border: rgba(0, 0, 0, 0.1);
+      --border2: rgba(0, 0, 0, 0.06);
+      --text: #1a1a16;
+      --text2: #6b6b5e;
+      --text3: #9e9e8f;
+      --green: #2d6a4f;
+      --green-light: #d8f3dc;
+      --green-mid: #52b788;
+      --amber: #b5451b;
+      --amber-light: #fde8d8;
+      --blue: #1d4e89;
+      --blue-light: #dbeafe;
+      --mono: 'DM Mono', monospace;
+      --serif: 'Fraunces', serif;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: var(--mono);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+
+    /* NAV */
+    nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1.25rem 2rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .nav-logo {
+      font-family: var(--serif);
+      font-size: 1.25rem;
+      font-weight: 500;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .nav-logo-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--green-mid);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1;
+        transform: scale(1);
+      }
+
+      50% {
+        opacity: 0.6;
+        transform: scale(1.2);
+      }
+    }
+
+    .nav-badge {
+      font-size: 11px;
+      padding: 3px 10px;
+      border-radius: 20px;
+      background: var(--green-light);
+      color: var(--green);
+      font-weight: 500;
+    }
+
+    /* HERO */
+    .hero {
+      padding: 3rem 2rem 2rem;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    .hero-label {
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 0.75rem;
+    }
+
+    .hero h1 {
+      font-family: var(--serif);
+      font-size: clamp(2rem, 5vw, 3.5rem);
+      font-weight: 300;
+      line-height: 1.1;
+      letter-spacing: -0.03em;
+      color: var(--text);
+      margin-bottom: 0.5rem;
+    }
+
+    .hero h1 em {
+      font-style: italic;
+      color: var(--green);
+    }
+
+    .hero-sub {
+      font-size: 13px;
+      color: var(--text2);
+      max-width: 500px;
+      margin-top: 0.75rem;
+    }
+
+    /* LOADING STATE */
+    .loading-overlay {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 4rem 2rem;
+      gap: 1rem;
+    }
+
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 2px solid var(--border);
+      border-top-color: var(--green-mid);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    .loading-text {
+      font-size: 13px;
+      color: var(--text2);
+    }
+
+    /* ERROR STATE */
+    .error-box {
+      background: #fff5f5;
+      border: 1px solid #fecaca;
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      margin: 1rem 0;
+      font-size: 13px;
+      color: #b91c1c;
+    }
+
+    /* MAIN GRID */
+    .main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 2rem 4rem;
+    }
+
+    /* STAT CARDS ROW */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 12px;
+      margin-bottom: 1.5rem;
+    }
+
+    .stat-card {
+      background: var(--card);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius);
+      padding: 1.25rem;
+      transition: border-color 0.2s;
+    }
+
+    .stat-card:hover {
+      border-color: var(--border);
+    }
+
+    .stat-label {
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 0.5rem;
+    }
+
+    .stat-value {
+      font-family: var(--serif);
+      font-size: 2rem;
+      font-weight: 300;
+      line-height: 1;
+      color: var(--text);
+      margin-bottom: 0.25rem;
+    }
+
+    .stat-value.green {
+      color: var(--green);
+    }
+
+    .stat-value.amber {
+      color: var(--amber);
+    }
+
+    .stat-unit {
+      font-size: 11px;
+      color: var(--text3);
+    }
+
+    /* TWO COL LAYOUT */
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    @media (max-width: 700px) {
+      .two-col {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* CARD */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+    }
+
+    .card-title {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 1.25rem;
+    }
+
+    /* CREDIT LIST */
+    .credit-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 0;
+      border-bottom: 1px solid var(--border2);
+      font-size: 13px;
+      transition: background 0.15s;
+    }
+
+    .credit-item:last-child {
+      border-bottom: none;
+    }
+
+    .credit-id {
+      font-size: 11px;
+      color: var(--text3);
+      margin-bottom: 2px;
+    }
+
+    .credit-kwh {
+      font-weight: 500;
+      color: var(--text);
+    }
+
+    .credit-badge {
+      font-size: 10px;
+      padding: 3px 8px;
+      border-radius: 20px;
+      background: var(--green-light);
+      color: var(--green);
+      font-weight: 500;
+    }
+
+    .credit-badge.pending {
+      background: var(--amber-light);
+      color: var(--amber);
+    }
+
+    /* MINT SECTION */
+    .mint-section {
+      background: var(--card);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      margin-bottom: 1rem;
+    }
+
+    .mint-title {
+      font-family: var(--serif);
+      font-size: 1.1rem;
+      font-weight: 400;
+      margin-bottom: 0.5rem;
+    }
+
+    .mint-desc {
+      font-size: 12px;
+      color: var(--text2);
+      margin-bottom: 1.25rem;
+      line-height: 1.5;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 0.75rem;
+    }
+
+    .input-row input {
+      flex: 1;
+      padding: 0.6rem 0.875rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-family: var(--mono);
+      font-size: 12px;
+      background: var(--bg);
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .input-row input:focus {
+      border-color: var(--green-mid);
+    }
+
+    .btn {
+      padding: 0.6rem 1.25rem;
+      border-radius: var(--radius-sm);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--text);
+      color: var(--bg);
+      transition: opacity 0.2s, transform 0.1s;
+      white-space: nowrap;
+    }
+
+    .btn:hover {
+      opacity: 0.85;
+    }
+
+    .btn:active {
+      transform: scale(0.98);
+    }
+
+    .btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .btn-outline {
+      background: transparent;
+      color: var(--text);
+    }
+
+    .btn-green {
+      background: var(--green);
+      border-color: var(--green);
+      color: white;
+    }
+
+    /* RESULT BOX */
+    .result-box {
+      background: var(--green-light);
+      border: 1px solid rgba(45, 106, 79, 0.2);
+      border-radius: var(--radius-sm);
+      padding: 1rem;
+      margin-top: 0.75rem;
+      font-size: 12px;
+      display: none;
+    }
+
+    .result-box.visible {
+      display: block;
+    }
+
+    .result-box .result-title {
+      font-weight: 500;
+      color: var(--green);
+      margin-bottom: 0.5rem;
+      font-size: 13px;
+    }
+
+    .result-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+      color: var(--green);
+    }
+
+    .result-row a {
+      color: var(--green);
+      text-decoration: underline;
+    }
+
+    /* VERIFY BOX */
+    .verify-result {
+      background: var(--blue-light);
+      border: 1px solid rgba(29, 78, 137, 0.2);
+      border-radius: var(--radius-sm);
+      padding: 1rem;
+      margin-top: 0.75rem;
+      font-size: 12px;
+      display: none;
+      color: var(--blue);
+    }
+
+    .verify-result.visible {
+      display: block;
+    }
+
+    /* CO2 EQUIVALENTS */
+    .equiv-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .equiv-item {
+      background: var(--bg2);
+      border-radius: var(--radius-sm);
+      padding: 0.875rem;
+      font-size: 12px;
+    }
+
+    .equiv-number {
+      font-family: var(--serif);
+      font-size: 1.5rem;
+      font-weight: 300;
+      color: var(--text);
+      line-height: 1;
+      margin-bottom: 4px;
+    }
+
+    .equiv-label {
+      font-size: 11px;
+      color: var(--text2);
+      line-height: 1.3;
+    }
+
+    /* CHAIN PROOF */
+    .chain-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 0.75rem 0;
+      border-bottom: 1px solid var(--border2);
+      font-size: 12px;
+    }
+
+    .chain-row:last-child {
+      border-bottom: none;
+    }
+
+    .chain-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green-mid);
+      margin-top: 4px;
+      flex-shrink: 0;
+    }
+
+    .chain-dot.pending {
+      background: var(--text3);
+    }
+
+    .chain-label {
+      color: var(--text2);
+      font-size: 11px;
+      margin-bottom: 2px;
+    }
+
+    .chain-value {
+      color: var(--text);
+      word-break: break-all;
+      line-height: 1.4;
+    }
+
+    .chain-value a {
+      color: var(--green);
+      text-decoration: none;
+    }
+
+    .chain-value a:hover {
+      text-decoration: underline;
+    }
+
+    /* FOOTER */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 1.5rem 2rem;
+      font-size: 11px;
+      color: var(--text3);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    /* TABS */
+    .tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 1.25rem;
+      border-bottom: 1px solid var(--border2);
+      padding-bottom: 0;
+    }
+
+    .tab {
+      font-size: 12px;
+      padding: 0.5rem 0.875rem;
+      border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+      cursor: pointer;
+      color: var(--text3);
+      background: transparent;
+      border: none;
+      font-family: var(--mono);
+      transition: color 0.15s;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+    }
+
+    .tab.active {
+      color: var(--text);
+      border-bottom-color: var(--green-mid);
+    }
+
+    .tab-panel {
+      display: none;
+    }
+
+    .tab-panel.active {
+      display: block;
+    }
+
+    /* ANIMATION */
+    @keyframes fadeUp {
+      from {
+        opacity: 0;
+        transform: translateY(12px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .fade-up {
+      animation: fadeUp 0.4s ease forwards;
+    }
+
+    .fade-up-2 {
+      animation-delay: 0.1s;
+      opacity: 0;
+    }
+
+    .fade-up-3 {
+      animation-delay: 0.2s;
+      opacity: 0;
+    }
+
+    .fade-up-4 {
+      animation-delay: 0.3s;
+      opacity: 0;
+    }
+
+    /* CONFIG NOTICE */
+    .config-notice {
+      background: var(--amber-light);
+      border: 1px solid rgba(181, 69, 27, 0.2);
+      border-radius: var(--radius-sm);
+      padding: 0.75rem 1rem;
+      font-size: 12px;
+      color: var(--amber);
+      margin-bottom: 1rem;
+      display: none;
+    }
+  </style>
+</head>
+
+<body>
+
+  <nav>
+    <div class="nav-logo">
+      <div class="nav-logo-dot"></div>
+      CTN
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span class="nav-badge" id="live-badge">connecting...</span>
+      <span style="font-size:12px;color:var(--text2);" id="credits-count">—</span>
+    </div>
+  </nav>
+
+  <div class="hero fade-up">
+    <p class="hero-label">Solar Carbon Credits · Amoy Testnet</p>
+    <h1>Your solar panel<br>earns <em>carbon credits.</em></h1>
+    <p class="hero-sub">34 days of clean energy generation, verified on-chain. Every kilowatt-hour you generate avoids
+      CO₂ — and earns you tradeable credits.</p>
+  </div>
+
+  <div class="main">
+
+    <div class="config-notice" id="config-notice">
+      ⚠ API URL not configured. Edit the <code>API_BASE</code> variable at the top of this file to point to your Railway
+      backend.
+    </div>
+
+    <!-- STATS -->
+    <div class="stats-grid fade-up fade-up-2" id="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Energy generated</div>
+        <div class="stat-value" id="stat-kwh">—</div>
+        <div class="stat-unit">kilowatt-hours</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">CO₂ avoided</div>
+        <div class="stat-value green" id="stat-co2">—</div>
+        <div class="stat-unit">kilograms</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Credits earned</div>
+        <div class="stat-value" id="stat-credits">—</div>
+        <div class="stat-unit">carbon credits</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Estimated value</div>
+        <div class="stat-value amber" id="stat-inr">—</div>
+        <div class="stat-unit">Indian rupees</div>
+      </div>
+    </div>
+
+    <div class="two-col fade-up fade-up-3">
+
+      <!-- LEFT: MINT + VERIFY -->
+      <div>
+        <!-- MINT -->
+        <div class="mint-section">
+          <div class="mint-title">Mint a credit on-chain</div>
+          <div class="mint-desc">Select a credit ID and enter a recipient wallet address. The credit will be minted on
+            Polygon Amoy and permanently linked to its IPFS data certificate.</div>
+          <div class="input-row">
+            <input type="number" id="mint-credit-id" placeholder="Credit ID (e.g. 1)" min="1"
+              style="max-width:140px;" />
+            <input type="text" id="mint-recipient" placeholder="0x... recipient wallet" />
+          </div>
+          <button class="btn btn-green" onclick="mintCredit()" id="mint-btn">Mint credit →</button>
+          <div class="result-box" id="mint-result">
+            <div class="result-title">✓ Credit minted successfully</div>
+            <div id="mint-result-body"></div>
+          </div>
+        </div>
+
+        <!-- VERIFY -->
+        <div class="card">
+          <div class="card-title">Verify on blockchain</div>
+          <div class="input-row">
+            <input type="number" id="verify-id" placeholder="Credit ID" min="1" />
+            <button class="btn btn-outline" onclick="verifyCredit()">Verify</button>
+          </div>
+          <div class="verify-result" id="verify-result"></div>
+        </div>
+      </div>
+
+      <!-- RIGHT: CREDITS LIST -->
+      <div class="card">
+        <div class="tabs">
+          <button class="tab active" onclick="switchTab('credits')">Recent credits</button>
+          <button class="tab" onclick="switchTab('equivalents')">CO₂ equivalents</button>
+          <button class="tab" onclick="switchTab('proof')">Chain proof</button>
+        </div>
+
+        <div class="tab-panel active" id="tab-credits">
+          <div id="credits-list">
+            <div style="font-size:12px;color:var(--text3);padding:1rem 0;">Loading credits...</div>
+          </div>
+          <div style="margin-top:1rem;display:flex;gap:8px;">
+            <button class="btn btn-outline" onclick="changePage(-1)" id="prev-btn" disabled>← prev</button>
+            <button class="btn btn-outline" onclick="changePage(1)" id="next-btn">next →</button>
+            <span style="font-size:11px;color:var(--text3);align-self:center;" id="page-info"></span>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="tab-equivalents">
+          <div class="equiv-grid" id="equiv-grid">
+            <div class="equiv-item">
+              <div class="equiv-number" id="eq-trees">—</div>
+              <div class="equiv-label">trees planted for 10 years</div>
+            </div>
+            <div class="equiv-item">
+              <div class="equiv-number" id="eq-cars">—</div>
+              <div class="equiv-label">cars taken off road for a year</div>
+            </div>
+            <div class="equiv-item">
+              <div class="equiv-number" id="eq-flights">—</div>
+              <div class="equiv-label">Delhi → Mumbai flights avoided</div>
+            </div>
+            <div class="equiv-item">
+              <div class="equiv-number" id="eq-phones">—</div>
+              <div class="equiv-label">smartphones fully charged</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="tab-proof">
+          <div id="chain-proof">
+            <div class="chain-row">
+              <div class="chain-dot"></div>
+              <div>
+                <div class="chain-label">Smart contract</div>
+                <div class="chain-value">
+                  <a href="https://amoy.polygonscan.com/address/0xE217F8cf746897ab2c8aeC2d0D255B78dC979Af4"
+                    target="_blank">0xE217F8cf...979Af4 ↗</a>
+                </div>
+              </div>
+            </div>
+            <div class="chain-row">
+              <div class="chain-dot"></div>
+              <div>
+                <div class="chain-label">IPFS data store</div>
+                <div class="chain-value" id="proof-ipfs">Loading...</div>
+              </div>
+            </div>
+            <div class="chain-row">
+              <div class="chain-dot"></div>
+              <div>
+                <div class="chain-label">Methodology</div>
+                <div class="chain-value">CEA Grid Emission Factor 0.82 kg CO₂/kWh</div>
+              </div>
+            </div>
+            <div class="chain-row">
+              <div class="chain-dot"></div>
+              <div>
+                <div class="chain-label">Network</div>
+                <div class="chain-value">Polygon Amoy Testnet (Chain ID 80002)</div>
+              </div>
+            </div>
+            <div class="chain-row">
+              <div class="chain-dot pending"></div>
+              <div>
+                <div class="chain-label">Standard</div>
+                <div class="chain-value" id="proof-standard">Loading...</div>
+              </div>
+            </div>
+            <div class="chain-row">
+              <div class="chain-dot"></div>
+              <div>
+                <div class="chain-label">Device ID</div>
+                <div class="chain-value" id="proof-device">Loading...</div>
+              </div>
+            </div>
+            <div class="chain-row">
+              <div class="chain-dot"></div>
+              <div>
+                <div class="chain-label">Period</div>
+                <div class="chain-value" id="proof-period">Loading...</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- DAILY BREAKDOWN BAR -->
+    <div class="card fade-up fade-up-4">
+      <div class="card-title">Daily generation estimate</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;">
+        <div>
+          <div style="font-family:var(--serif);font-size:1.75rem;font-weight:300;" id="daily-kwh">—</div>
+          <div style="font-size:11px;color:var(--text3);">kWh per day</div>
+        </div>
+        <div>
+          <div style="font-family:var(--serif);font-size:1.75rem;font-weight:300;color:var(--green);" id="daily-co2">—
+          </div>
+          <div style="font-size:11px;color:var(--text3);">kg CO₂ per day</div>
+        </div>
+        <div>
+          <div style="font-family:var(--serif);font-size:1.75rem;font-weight:300;color:var(--amber);" id="daily-inr">—
+          </div>
+          <div style="font-size:11px;color:var(--text3);">₹ earned per day</div>
+        </div>
+      </div>
+      <div style="margin-top:1.25rem;background:var(--bg2);border-radius:var(--radius-sm);overflow:hidden;height:8px;">
+        <div id="progress-bar"
+          style="height:100%;background:var(--green-mid);width:0%;transition:width 1s ease;border-radius:var(--radius-sm);">
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px;" id="progress-label">Calculating...</div>
+    </div>
+
+  </div>
+
+  <footer>
+    <span>CTN · Climate Trust Network · Patna, India</span>
+    <span id="footer-period">—</span>
+  </footer>
+
+  <script>
+    // ═══════════════════════════════════════════════
+    // CONFIG — change this to your Railway backend URL
+    // ═══════════════════════════════════════════════
+    const API_BASE = 'https://ctn-api-railway-production.up.railway.app';
+    // ═══════════════════════════════════════════════
+
+    let currentPage = 1;
+    const PAGE_SIZE = 8;
+    let totalCredits = 0;
+    let statsData = null;
+
+    async function api(path, options = {}) {
+      const r = await fetch(API_BASE + path, options);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    }
+
+    async function init() {
+      if (API_BASE.includes('your-railway-url')) {
+        document.getElementById('config-notice').style.display = 'block';
+        document.getElementById('live-badge').textContent = 'demo mode';
+        loadDemoData();
+        return;
+      }
+
+      try {
+        const [stats, daily, credits] = await Promise.all([
+          api('/stats'),
+          api('/daily'),
+          api('/credits?page=1&limit=' + PAGE_SIZE)
+        ]);
+
+        statsData = stats;
+        populateStats(stats, daily);
+        populateCredits(credits);
+        populateEquivalents(stats);
+        populateProof(stats);
+        populateDaily(daily, stats);
+
+        document.getElementById('live-badge').textContent = 'live';
+        document.getElementById('live-badge').style.background = 'var(--green-light)';
+        document.getElementById('live-badge').style.color = 'var(--green)';
+
+      } catch (e) {
+        document.getElementById('live-badge').textContent = 'offline';
+        document.getElementById('live-badge').style.background = 'var(--amber-light)';
+        document.getElementById('live-badge').style.color = 'var(--amber)';
+        console.error('API error:', e);
+        loadDemoData();
+      }
+    }
+
+    function populateStats(stats, daily) {
+      document.getElementById('stat-kwh').textContent = stats.total_kwh?.toLocaleString('en-IN') || '—';
+      document.getElementById('stat-co2').textContent = stats.total_co2_kg?.toLocaleString('en-IN') || '—';
+      document.getElementById('stat-credits').textContent = stats.total_credits || '—';
+      document.getElementById('stat-inr').textContent = '₹' + (stats.value_inr?.toLocaleString('en-IN') || '—');
+      document.getElementById('credits-count').textContent = (stats.total_credits || 0) + ' credits';
+      totalCredits = stats.total_credits || 0;
+    }
+
+    function populateDaily(daily, stats) {
+      document.getElementById('daily-kwh').textContent = daily.kwh_per_day?.toFixed(1) || '—';
+      document.getElementById('daily-co2').textContent = daily.co2_per_day_kg?.toFixed(1) || '—';
+      document.getElementById('daily-inr').textContent = '₹' + (daily.inr_per_day?.toFixed(0) || '—');
+
+      const pct = Math.min(100, ((stats.total_co2_tonnes || 0) / 1) * 100);
+      document.getElementById('progress-bar').style.width = pct + '%';
+      document.getElementById('progress-label').textContent =
+        `${(stats.total_co2_tonnes || 0).toFixed(3)} of 1.0 tonne CO₂ threshold · ${pct.toFixed(1)}% complete`;
+
+      document.getElementById('footer-period').textContent =
+        (stats.period_start || '').slice(0, 10) + ' → ' + (stats.period_end || '').slice(0, 10);
+    }
+
+    function populateCredits(data) {
+      totalCredits = data.total || totalCredits;
+      const list = document.getElementById('credits-list');
+      if (!data.credits || data.credits.length === 0) {
+        list.innerHTML = '<div style="font-size:12px;color:var(--text3);padding:1rem 0;">No credits found.</div>';
+        return;
+      }
+
+      list.innerHTML = data.credits.map(c => `
+      <div class="credit-item">
+        <div>
+          <div class="credit-id">#${c.credit_id} · ${(c.period_start || '').slice(0, 10)}</div>
+          <div class="credit-kwh">${(c.total_kwh || 0).toFixed(2)} kWh</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:11px;color:var(--text2);">${(c.co2_avoided_kg || 0).toFixed(1)} kg CO₂</span>
+          <span class="credit-badge">verified</span>
+        </div>
+      </div>
+    `).join('');
+
+      const pages = Math.ceil(totalCredits / PAGE_SIZE);
+      document.getElementById('page-info').textContent = `page ${currentPage} of ${pages}`;
+      document.getElementById('prev-btn').disabled = currentPage <= 1;
+      document.getElementById('next-btn').disabled = currentPage >= pages;
+    }
+
+    function populateEquivalents(stats) {
+      const co2 = stats.total_co2_kg || 0;
+      document.getElementById('eq-trees').textContent = Math.round(co2 / 21);
+      document.getElementById('eq-cars').textContent = (co2 / 4600).toFixed(2);
+      document.getElementById('eq-flights').textContent = (co2 / 180).toFixed(1);
+      document.getElementById('eq-phones').textContent = Math.round(co2 / 0.008).toLocaleString('en-IN');
+    }
+
+    function populateProof(stats) {
+      document.getElementById('proof-ipfs').innerHTML =
+        `<a href="${stats.ipfs_master || '#'}" target="_blank">${(stats.ipfs_master || '').slice(0, 40)}... ↗</a>`;
+      document.getElementById('proof-device').textContent = stats.device_id || '—';
+      document.getElementById('proof-period').textContent =
+        (stats.period_start || '').slice(0, 10) + ' → ' + (stats.period_end || '').slice(0, 10);
+      document.getElementById('proof-standard').textContent = 'CTN-SOLAR-V1 (pending Gold Standard)';
+    }
+
+    async function changePage(dir) {
+      const pages = Math.ceil(totalCredits / PAGE_SIZE);
+      const next = currentPage + dir;
+      if (next < 1 || next > pages) return;
+      currentPage = next;
+      try {
+        const data = await api(`/credits?page=${currentPage}&limit=${PAGE_SIZE}`);
+        populateCredits(data);
+      } catch (e) { console.error(e); }
+    }
+
+    async function mintCredit() {
+      const creditId = document.getElementById('mint-credit-id').value;
+      const recipient = document.getElementById('mint-recipient').value.trim();
+
+      if (!creditId || !recipient) {
+        alert('Please enter both a credit ID and recipient wallet address.');
+        return;
+      }
+
+      const btn = document.getElementById('mint-btn');
+      btn.disabled = true;
+      btn.textContent = 'Minting...';
+
+      const resultBox = document.getElementById('mint-result');
+      const resultBody = document.getElementById('mint-result-body');
+      resultBox.classList.remove('visible');
+
+      try {
+        const data = await api(`/mint/${creditId}?recipient=${encodeURIComponent(recipient)}`, { method: 'POST' });
+
+        resultBody.innerHTML = `
+        <div class="result-row"><span>Credit ID</span><span>#${data.credit_id}</span></div>
+        <div class="result-row"><span>Recipient</span><span>${(data.recipient || '').slice(0, 10)}...${(data.recipient || '').slice(-4)}</span></div>
+        <div class="result-row"><span>IPFS hash</span><span>${(data.individual_ipfs_hash || '').slice(0, 12)}...</span></div>
+        <div class="result-row"><span>Transaction</span><a href="${data.polygonscan}" target="_blank">${(data.tx_hash || '').slice(0, 10)}... ↗</a></div>
+      `;
+        resultBox.classList.add('visible');
+
+      } catch (e) {
+        alert('Mint failed. Check Railway logs for details.\n\n' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Mint credit →';
+      }
+    }
+
+    async function verifyCredit() {
+      const creditId = document.getElementById('verify-id').value;
+      if (!creditId) return;
+
+      const box = document.getElementById('verify-result');
+      box.classList.remove('visible');
+      box.textContent = 'Checking blockchain...';
+      box.classList.add('visible');
+
+      try {
+        const data = await api(`/verify/${creditId}`);
+
+        if (data.on_chain) {
+          box.innerHTML = `
+          <div style="font-weight:500;margin-bottom:8px;font-size:13px;">✓ Credit #${creditId} is on-chain</div>
+          <div style="margin-bottom:4px;">Energy: ${data.energy_kwh} kWh · CO₂: ${data.co2_avoided_kg} kg</div>
+          <div style="margin-bottom:4px;">Holder: ${(data.holder || '').slice(0, 10)}...${(data.holder || '').slice(-4)}</div>
+          <div style="margin-bottom:4px;">Retired: ${data.retired ? 'Yes' : 'No'}</div>
+          <div><a href="${data.polygonscan}" target="_blank" style="color:var(--blue);">View on Polygonscan ↗</a></div>
+        `;
+        } else {
+          box.innerHTML = `<div>Credit #${creditId} not found on chain yet. Mint it first.</div>`;
+        }
+      } catch (e) {
+        box.textContent = 'Verification failed: ' + e.message;
+      }
+    }
+
+    function switchTab(name) {
+      document.querySelectorAll('.tab').forEach((t, i) => {
+        t.classList.toggle('active', ['credits', 'equivalents', 'proof'][i] === name);
+      });
+      document.querySelectorAll('.tab-panel').forEach(p => {
+        p.classList.toggle('active', p.id === 'tab-' + name);
+      });
+    }
+
+    function loadDemoData() {
+      const demo = {
+        total_kwh: 1994.17,
+        total_co2_kg: 1635.22,
+        total_co2_tonnes: 1.635,
+        total_credits: 34,
+        value_usd: 170,
+        value_inr: 14110,
+        device_id: '1BY6WEcLGh8j5v7',
+        period_start: '2020-05-15 00:00:00',
+        period_end: '2020-06-17 23:59:59',
+        ipfs_master: 'https://ivory-geographical-lungfish-400.mypinata.cloud/ipfs/bafybeifpn7y2r2rsjtvm4hun3dy63jkp5ah7qxfwhk5u6bemkapmis2qku',
+      };
+      const daily = {
+        kwh_per_day: 58.65,
+        co2_per_day_kg: 48.1,
+        inr_per_day: 415
+      };
+      statsData = demo;
+      populateStats(demo, daily);
+      populateDaily(daily, demo);
+      populateEquivalents(demo);
+      populateProof(demo);
+
+      const demoCredits = Array.from({ length: 8 }, (_, i) => ({
+        credit_id: i + 1,
+        total_kwh: 58.65 + (Math.random() * 10 - 5),
+        co2_avoided_kg: 48.1 + (Math.random() * 5 - 2.5),
+        period_start: '2020-05-' + String(15 + i).padStart(2, '0') + ' 00:00:00'
+      }));
+      populateCredits({ credits: demoCredits, total: 34 });
+    }
+
+    init();
+  </script>
+</body>
+
+</html>
