@@ -978,8 +978,11 @@
       try {
         const data = await api(`/mint/${creditId}?recipient=${encodeURIComponent(recipient)}`, { method: 'POST' });
 
+        document.getElementById('verify-id').value = data.on_chain_id;
+
         resultBody.innerHTML = `
-        <div class="result-row"><span>Credit ID</span><span>#${data.credit_id}</span></div>
+        <div class="result-row"><span>On-Chain ID</span><span>#${data.on_chain_id}</span></div>
+        <div class="result-row"><span>Database ID</span><span>#${data.credit_id}</span></div>
         <div class="result-row"><span>Recipient</span><span>${(data.recipient || '').slice(0, 10)}...${(data.recipient || '').slice(-4)}</span></div>
         <div class="result-row"><span>IPFS hash</span><span>${(data.individual_ipfs_hash || '').slice(0, 12)}...</span></div>
         <div class="result-row"><span>Transaction</span><a href="${data.polygonscan}" target="_blank">${(data.tx_hash || '').slice(0, 10)}... ↗</a></div>
