@@ -364,7 +364,7 @@ def mint_credit(credit_id: int, recipient: str):
     # 6. Extract on-chain credit ID from CreditMinted event
     on_chain_id = None
     credit_minted_event = contract.events.CreditMinted()
-    logs = credit_minted_event.process_receipt(receipt, errors='warn')
+    logs = credit_minted_event.process_receipt(receipt, errors='DISCARD')
     if logs:
         on_chain_id = logs[0]['args']['id']
 
