@@ -249,13 +249,32 @@ ABI = [
         "type": "function"
     },
     {
-    "inputs": [
-        {"internalType": "uint256", "name": "creditId", "type": "uint256"}
-    ],
-    "name": "retireCredit",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
+        "inputs": [
+            {"internalType": "uint256", "name": "creditId", "type": "uint256"}
+        ],
+        "name": "retireCredit",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "internalType": "uint256", "name": "id", "type": "uint256"},
+            {"indexed": False, "internalType": "string", "name": "ipfsHash", "type": "string"},
+            {"indexed": False, "internalType": "address", "name": "holder", "type": "address"}
+        ],
+        "name": "CreditMinted",
+        "type": "event"
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "internalType": "uint256", "name": "id", "type": "uint256"},
+            {"indexed": False, "internalType": "address", "name": "holder", "type": "address"}
+        ],
+        "name": "CreditRetired",
+        "type": "event"
     }
 ]
 
