@@ -402,7 +402,7 @@ def verify_on_chain(credit_id: int):
             "retired": result[4],
             "holder": result[5],
             "verify_ipfs": f"https://gateway.pinata.cloud/ipfs/{result[0]}",
-            "polygonscan": f"{EXPLORER}/tx/{result[0]}"
+            "polygonscan": f"{EXPLORER}/address/{CONTRACT_ADDRESS}"
         }
     except Exception as e:
         return {"credit_id": credit_id, "on_chain": False, "error": str(e)}
