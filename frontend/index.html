@@ -33,6 +33,7 @@
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
 
     body {
       font-family: var(--mono);
@@ -49,12 +50,47 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 1.25rem 2rem;
+      padding: 1rem 2rem;
       border-bottom: 1px solid var(--border);
       background: var(--bg);
       position: sticky;
       top: 0;
       z-index: 100;
+    }
+
+    .nav-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .nav-sections {
+      display: flex;
+      gap: 2px;
+      margin-left: 12px;
+      padding-left: 12px;
+      border-left: 1px solid var(--border);
+    }
+
+    .nav-section-link {
+      font-size: 11px;
+      padding: 0.3rem 0.6rem;
+      border-radius: var(--radius-sm);
+      color: var(--text3);
+      text-decoration: none;
+      transition: all 0.15s;
+      font-family: var(--mono);
+      white-space: nowrap;
+    }
+
+    .nav-section-link:hover {
+      color: var(--text);
+      background: var(--bg2);
+    }
+
+    .nav-section-link.active {
+      color: var(--text);
+      background: var(--bg2);
     }
 
     .nav-left {
@@ -144,6 +180,7 @@
 
     section {
       padding: 3rem 0;
+      scroll-margin-top: 60px;
     }
 
     .section-border {
@@ -749,6 +786,10 @@
       .stat-value { font-size: 1.5rem; }
       .nav-right .nav-link { display: none; }
     }
+
+    @media (max-width: 860px) {
+      .nav-sections { display: none; }
+    }
   </style>
 </head>
 
@@ -761,6 +802,12 @@
         CTN
       </a>
       <span class="nav-badge" id="live-badge">connecting…</span>
+      <div class="nav-sections">
+        <a href="#stats" class="nav-section-link">Live stats</a>
+        <a href="#how" class="nav-section-link">How it works</a>
+        <a href="#join" class="nav-section-link">Get started</a>
+        <a href="#verify" class="nav-section-link">Verify</a>
+      </div>
     </div>
     <div class="nav-right">
       <a href="/marketplace" class="nav-link">Marketplace</a>
@@ -807,7 +854,7 @@
 
   <!-- ═══ LIVE STATS ═══ -->
   <div class="wrap">
-    <section class="fade-up fade-up-2">
+    <section class="fade-up fade-up-2" id="stats">
       <div class="section-label">Network totals · live from API</div>
       <div class="stats-grid" id="stats-grid">
         <div class="stat-card">
@@ -836,7 +883,7 @@
 
   <!-- ═══ HOW IT WORKS ═══ -->
   <div class="wrap">
-    <section class="process section-border fade-up fade-up-3">
+    <section class="process section-border fade-up fade-up-3" id="how">
       <div class="section-label">How it works</div>
       <div class="process-steps">
         <div class="process-step">
@@ -860,7 +907,7 @@
 
   <!-- ═══ TWO AUDIENCES ═══ -->
   <div class="wrap">
-    <section class="section-border fade-up fade-up-4">
+    <section class="section-border fade-up fade-up-4" id="join">
       <div class="section-label">Who this is for</div>
       <div class="audience-grid">
 
@@ -920,7 +967,7 @@
 
   <!-- ═══ CHAIN TRANSPARENCY ═══ -->
   <div class="wrap">
-    <section class="section-border fade-up fade-up-5">
+    <section class="section-border fade-up fade-up-5" id="verify">
       <div class="section-label">Chain proof & transparency</div>
       <div class="chain-grid">
 
@@ -1173,6 +1220,26 @@
     }
 
     init();
+
+    // ── Scroll-spy: highlight active section in nav ──
+    const sectionIds = ['stats', 'how', 'join', 'verify'];
+    const sectionEls = sectionIds.map(id => document.getElementById(id));
+    const navLinks = document.querySelectorAll('.nav-section-link');
+
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        const id = entry.target.id;
+        const link = document.querySelector(`.nav-section-link[href="#${id}"]`);
+        if (link) {
+          if (entry.isIntersecting) {
+            navLinks.forEach(l => l.classList.remove('active'));
+            link.classList.add('active');
+          }
+        }
+      });
+    }, { rootMargin: '-30% 0px -60% 0px' });
+
+    sectionEls.forEach(el => { if (el) observer.observe(el); });
   </script>
 </body>
 
