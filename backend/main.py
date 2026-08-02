@@ -361,12 +361,8 @@ def mint_credit(credit_id: int, recipient: str):
             f"Transaction REVERTED on-chain. Check tx on Polygonscan: {EXPLORER}/tx/{tx_hash.hex()}"
         )
 
-    # 6. Extract on-chain credit ID from CreditMinted event
-    on_chain_id = None
-    credit_minted_event = contract.events.CreditMinted()
-    logs = credit_minted_event.process_receipt(receipt, errors='DISCARD')
-    if logs:
-        on_chain_id = logs[0]['args']['id']
+    # 6. Get on-chain credit ID (contract auto-increments totalCredits)
+    on_chain_id = contract.functions.totalCredits().call()
 
     return {
         "status": "minted",
