@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CTN — Carbon Credit Marketplace</title>
+  <meta name="description" content="Purchase verified carbon credits from solar panel operators. Each credit is backed by real energy generation data and on-chain proof.">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f5f2eb; --bg2: #eceadf; --card: #ffffff;
+      --border: rgba(0,0,0,0.1); --border2: rgba(0,0,0,0.06);
+      --text: #1a1a16; --text2: #6b6b5e; --text3: #9e9e8f;
+      --green: #2d6a4f; --green-light: #d8f3dc; --green-mid: #52b788;
+      --amber: #b5451b; --amber-light: #fde8d8;
+      --blue: #1d4e89; --blue-light: #dbeafe;
+      --red: #b91c1c; --red-light: #fee2e2;
+      --mono: 'DM Mono', monospace; --serif: 'Fraunces', serif;
+      --radius: 12px; --radius-sm: 8px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: var(--mono); background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.6; }
+    nav { display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.5rem; border-bottom: 1px solid var(--border); background: var(--bg); position: sticky; top: 0; z-index: 100; }
+    .nav-left { display: flex; align-items: center; gap: 10px; }
+    .nav-logo { font-family: var(--serif); font-size: 1.15rem; font-weight: 500; display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--text); }
+    .nav-logo-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green-mid); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:0.6; transform:scale(1.2); } }
+    .nav-links { display: flex; gap: 4px; }
+    .nav-link { font-size: 12px; padding: 0.4rem 0.75rem; border-radius: var(--radius-sm); color: var(--text2); text-decoration: none; transition: all 0.15s; }
+    .nav-link:hover { color: var(--text); background: var(--bg2); }
+    .nav-link.active { color: var(--text); background: var(--bg2); }
+    .nav-right { display: flex; align-items: center; gap: 10px; }
+    .nav-user { font-size: 11px; color: var(--text3); }
+    .btn-sm { font-size: 11px; padding: 0.35rem 0.75rem; border-radius: var(--radius-sm); font-family: var(--mono); cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text2); }
+    .main { max-width: 900px; margin: 0 auto; padding: 1.5rem; }
+    .page-header { margin-bottom: 1.5rem; }
+    .page-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text3); margin-bottom: 0.35rem; }
+    .page-header h1 { font-family: var(--serif); font-size: clamp(1.5rem, 4vw, 2.25rem); font-weight: 300; line-height: 1.15; }
+    .page-header h1 em { font-style: italic; color: var(--green); }
+    .page-desc { font-size: 12px; color: var(--text2); margin-top: 0.5rem; max-width: 480px; line-height: 1.5; }
+
+    .sim-banner { background: var(--amber-light); border: 1px solid rgba(181,69,27,0.15); border-radius: var(--radius-sm); padding: 0.6rem 1rem; font-size: 11px; color: var(--amber); margin-bottom: 1.25rem; text-align: center; font-weight: 500; letter-spacing: 0.04em; }
+
+    .market-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 1.25rem; }
+    .market-stat { background: var(--card); border: 1px solid var(--border2); border-radius: var(--radius-sm); padding: 0.85rem; text-align: center; }
+    .market-stat-value { font-family: var(--serif); font-size: 1.5rem; font-weight: 300; }
+    .market-stat-value.green { color: var(--green); }
+    .market-stat-label { font-size: 9px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 0.15rem; }
+
+    .listing-card { background: var(--card); border: 1px solid var(--border2); border-radius: var(--radius); padding: 1.25rem; margin-bottom: 0.75rem; transition: border-color 0.2s; }
+    .listing-card:hover { border-color: var(--border); }
+    .listing-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.75rem; }
+    .listing-seller { font-size: 11px; color: var(--text3); }
+    .listing-location { font-size: 12px; font-weight: 500; }
+    .listing-badge { font-size: 10px; padding: 3px 10px; border-radius: 20px; background: var(--green-light); color: var(--green); font-weight: 500; }
+    .listing-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 0.75rem; }
+    .listing-stat { background: var(--bg2); border-radius: var(--radius-sm); padding: 0.5rem; text-align: center; }
+    .listing-stat-value { font-family: var(--serif); font-size: 1.1rem; font-weight: 300; }
+    .listing-stat-label { font-size: 9px; color: var(--text3); }
+    .listing-price { display: flex; justify-content: space-between; align-items: center; padding-top: 0.75rem; border-top: 1px solid var(--border2); }
+    .listing-price-value { font-family: var(--serif); font-size: 1.1rem; font-weight: 400; color: var(--green); }
+    .btn-buy { padding: 0.5rem 1.25rem; border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; font-weight: 500; cursor: pointer; border: none; background: var(--text); color: var(--bg); transition: opacity 0.2s; }
+    .btn-buy:hover { opacity: 0.85; }
+    .btn-buy:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    .empty-state { text-align: center; padding: 3rem 1rem; }
+    .empty-title { font-family: var(--serif); font-size: 1.1rem; font-weight: 400; margin-bottom: 0.5rem; }
+    .empty-desc { font-size: 12px; color: var(--text2); max-width: 300px; margin: 0 auto; line-height: 1.5; }
+
+    /* PURCHASE MODAL */
+    .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.4); z-index: 200; align-items: center; justify-content: center; padding: 1.5rem; }
+    .modal-overlay.visible { display: flex; }
+    .modal { background: var(--card); border-radius: var(--radius); padding: 1.5rem; max-width: 440px; width: 100%; max-height: 85vh; overflow-y: auto; }
+    .modal-title { font-family: var(--serif); font-size: 1.25rem; font-weight: 400; margin-bottom: 0.5rem; }
+    .modal-desc { font-size: 12px; color: var(--text2); margin-bottom: 1rem; line-height: 1.5; }
+    .modal-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 1.25rem; }
+    .btn-cancel { padding: 0.5rem 1rem; border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text2); }
+    .btn-confirm { padding: 0.5rem 1.25rem; border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; font-weight: 500; cursor: pointer; border: none; background: var(--green); color: white; }
+    .btn-confirm:disabled { opacity: 0.35; cursor: not-allowed; }
+    .error-msg { background: var(--red-light); border: 1px solid rgba(185,28,28,0.2); border-radius: var(--radius-sm); padding: 0.65rem; font-size: 12px; color: var(--red); margin-top: 0.75rem; display: none; }
+    .error-msg.visible { display: block; }
+
+    /* RECEIPT */
+    .receipt { background: var(--green-light); border: 1px solid rgba(45,106,79,0.2); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1rem; }
+    .receipt-title { font-family: var(--serif); font-size: 1.1rem; font-weight: 400; color: var(--green); margin-bottom: 0.75rem; }
+    .receipt-row { display: flex; justify-content: space-between; padding: 0.35rem 0; font-size: 12px; color: var(--green); }
+    .receipt-sim { background: var(--amber-light); border: 1px solid rgba(181,69,27,0.15); border-radius: var(--radius-sm); padding: 0.5rem 0.75rem; font-size: 10px; color: var(--amber); margin-top: 0.75rem; text-align: center; font-weight: 500; }
+
+    footer { border-top: 1px solid var(--border); padding: 1.25rem 1.5rem; font-size: 10px; color: var(--text3); text-align: center; }
+    @keyframes fadeUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
+    .fade-up { animation: fadeUp 0.4s ease forwards; }
+    .fade-up-2 { animation-delay: 0.1s; opacity: 0; }
+    @media (max-width: 600px) { .market-stats { grid-template-columns: 1fr; } .listing-stats { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-left">
+      <a href="/" class="nav-logo"><div class="nav-logo-dot"></div> CTN</a>
+      <div class="nav-links">
+        <a href="/marketplace" class="nav-link active">Browse</a>
+        <a href="#" class="nav-link" onclick="showPurchases()">My purchases</a>
+      </div>
+    </div>
+    <div class="nav-right">
+      <span class="nav-user" id="nav-user">—</span>
+      <button class="btn-sm" onclick="logout()">Sign out</button>
+    </div>
+  </nav>
+
+  <div class="main" id="main-content">
+    <div class="page-header fade-up">
+      <p class="page-label">Carbon Credit Marketplace</p>
+      <h1>Buy verified<br><em>carbon credits.</em></h1>
+      <p class="page-desc">Each credit represents real solar energy generation, verified on-chain with IPFS data certificates. Purchase credits to offset your emissions.</p>
+    </div>
+
+    <div class="sim-banner fade-up">SIMULATED MARKETPLACE — No real payments are processed. Amoy testnet only.</div>
+
+    <div class="market-stats fade-up fade-up-2" id="market-stats"></div>
+    <div id="listings-container" class="fade-up fade-up-2"></div>
+  </div>
+
+  <!-- PURCHASE MODAL -->
+  <div class="modal-overlay" id="purchase-modal">
+    <div class="modal">
+      <div class="modal-title" id="modal-title">Purchase credits</div>
+      <div class="modal-desc" id="modal-desc"></div>
+      <div id="modal-body"></div>
+      <div id="modal-error" class="error-msg"></div>
+      <div class="modal-footer" id="modal-footer">
+        <button class="btn-cancel" onclick="closeModal()">Cancel</button>
+        <button class="btn-confirm" id="modal-confirm" onclick="handlePurchaseStep()">Reserve credits →</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>CTN · Climate Trust Network · Simulated marketplace · Amoy Testnet</footer>
+
+  <script>
+    const API = window.location.origin;
+    let currentUser = null;
+    let selectedCredits = [];
+    let reservedIds = [];
+    let purchaseStep = 'select'; // 'select' → 'confirm' → 'done'
+
+    async function checkAuth() {
+      try {
+        const r = await fetch(API + '/api/auth/me', { credentials: 'include' });
+        if (!r.ok) throw new Error();
+        const d = await r.json();
+        if (d.user.role !== 'buyer') {
+          // Allow installers to browse but not buy
+          if (d.user.role === 'installer') {
+            document.querySelectorAll('.btn-buy').forEach(b => { b.disabled = true; b.title = 'Switch to a buyer account to purchase'; });
+          }
+          return d.user;
+        }
+        return d.user;
+      } catch(e) { window.location.href = '/login?role=buyer&return=/marketplace'; return null; }
+    }
+
+    async function logout() {
+      await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'include' });
+      window.location.href = '/login';
+    }
+
+    async function init() {
+      currentUser = await checkAuth();
+      if (currentUser) {
+        document.getElementById('nav-user').innerHTML = `${currentUser.email} <span style="opacity:0.6;margin-left:4px;">(${currentUser.role})</span>`;
+        document.getElementById('nav-login').style.display = 'none';
+        document.getElementById('nav-logout').style.display = 'inline-block';
+      }
+      loadListings();
+    }
+
+    async function loadListings() {
+      try {
+        const data = await fetch(API + '/api/marketplace/listings', { 
+          credentials: 'include',
+          headers: {
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache'
+          }
+        }).then(r => r.json());
+
+        document.getElementById('market-stats').innerHTML = `
+          <div class="market-stat">
+            <div class="market-stat-value green">${data.total_available}</div>
+            <div class="market-stat-label">Credits available</div>
+          </div>
+          <div class="market-stat">
+            <div class="market-stat-value">₹${data.price_per_credit_inr}</div>
+            <div class="market-stat-label">Per credit</div>
+          </div>
+          <div class="market-stat">
+            <div class="market-stat-value">₹${(data.total_available * data.price_per_credit_inr).toLocaleString('en-IN')}</div>
+            <div class="market-stat-label">Total value</div>
+          </div>
+        `;
+
+        const container = document.getElementById('listings-container');
+        if (!data.listings || data.listings.length === 0) {
+          container.innerHTML = `
+            <div class="empty-state">
+              <div style="font-size:2rem;margin-bottom:0.75rem;opacity:0.4;">☀</div>
+              <div class="empty-title">No credits listed yet</div>
+              <div class="empty-desc">Credits appear here when solar installers list them for sale. Check back soon.</div>
+            </div>`;
+          return;
+        }
+
+        container.innerHTML = data.listings.map((listing, i) => `
+          <div class="listing-card">
+            <div class="listing-header">
+              <div>
+                <div class="listing-location">${listing.location || 'India'}</div>
+                <div class="listing-seller">Seller: ${listing.seller_email || 'Anonymous'}</div>
+              </div>
+              <div class="listing-badge">${listing.credit_count} credits</div>
+            </div>
+            <div class="listing-stats">
+              <div class="listing-stat">
+                <div class="listing-stat-value">${Math.round(listing.total_kwh).toLocaleString()}</div>
+                <div class="listing-stat-label">kWh generated</div>
+              </div>
+              <div class="listing-stat">
+                <div class="listing-stat-value">${Math.round(listing.total_co2_kg).toLocaleString()}</div>
+                <div class="listing-stat-label">kg CO₂ avoided</div>
+              </div>
+              <div class="listing-stat">
+                <div class="listing-stat-value">₹${(listing.credit_count * listing.price_per_credit_inr).toLocaleString('en-IN')}</div>
+                <div class="listing-stat-label">Total price</div>
+              </div>
+            </div>
+            <div class="listing-price">
+              <div class="listing-price-value">₹${listing.price_per_credit_inr} per credit</div>
+              <button class="btn-buy" onclick='openPurchase(${JSON.stringify(listing.credits.map(c => c.id))}, ${listing.credit_count}, ${listing.credit_count * listing.price_per_credit_inr})'
+                ${(!currentUser || currentUser.role !== 'buyer') ? 'disabled' : ''}>
+                ${!currentUser ? 'Log in to buy →' : (currentUser.role !== 'buyer' ? 'Buyers only →' : `Buy ${listing.credit_count} credits →`)}
+              </button>
+            </div>
+          </div>
+        `).join('');
+
+      } catch(e) {
+        console.error(e);
+        document.getElementById('listings-container').innerHTML = `
+          <div class="empty-state">
+            <div class="empty-title">Could not load marketplace</div>
+            <div class="empty-desc">Please refresh or try again later.</div>
+          </div>`;
+      }
+    }
+
+    function openPurchase(creditIds, count, totalInr) {
+      selectedCredits = creditIds;
+      reservedIds = [];
+      purchaseStep = 'select';
+
+      document.getElementById('modal-title').textContent = 'Purchase credits';
+      document.getElementById('modal-desc').textContent = `You're about to purchase ${count} verified carbon credits.`;
+      document.getElementById('modal-body').innerHTML = `
+        <div style="background:var(--bg2);border-radius:var(--radius-sm);padding:1rem;font-size:12px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Credits</span><span>${count}</span></div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Price per credit</span><span>₹${(5 * 83).toLocaleString('en-IN')}</span></div>
+          <div style="border-top:1px solid var(--border);margin:8px 0;"></div>
+          <div style="display:flex;justify-content:space-between;font-weight:500;"><span>Total</span><span>₹${totalInr.toLocaleString('en-IN')}</span></div>
+        </div>
+        <div style="font-size:10px;color:var(--amber);margin-top:0.5rem;text-align:center;font-weight:500;">SIMULATED — no real payment will be charged</div>
+      `;
+      document.getElementById('modal-error').classList.remove('visible');
+      document.getElementById('modal-confirm').textContent = 'Reserve credits →';
+      document.getElementById('modal-confirm').disabled = false;
+      document.getElementById('modal-footer').style.display = 'flex';
+      document.getElementById('purchase-modal').classList.add('visible');
+    }
+
+    function closeModal() {
+      document.getElementById('purchase-modal').classList.remove('visible');
+      // If we reserved but didn't complete, cancel the reservation
+      if (reservedIds.length > 0 && purchaseStep !== 'done') {
+        fetch(API + '/api/marketplace/cancel-reservation', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ credit_ids: reservedIds })
+        }).catch(() => {});
+      }
+    }
+
+    async function handlePurchaseStep() {
+      const btn = document.getElementById('modal-confirm');
+      const errEl = document.getElementById('modal-error');
+      errEl.classList.remove('visible');
+
+      if (purchaseStep === 'select') {
+        // Step 1: Reserve
+        btn.disabled = true; btn.textContent = 'Reserving...';
+        try {
+          const r = await fetch(API + '/api/marketplace/reserve', {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ credit_ids: selectedCredits })
+          });
+          const data = await r.json();
+          if (!r.ok) {
+            errEl.textContent = data.detail || 'Reservation failed. These credits may have been purchased by another buyer.';
+            errEl.classList.add('visible');
+            btn.disabled = false; btn.textContent = 'Reserve credits →';
+            return;
+          }
+          reservedIds = data.reserved_credit_ids;
+          purchaseStep = 'confirm';
+          document.getElementById('modal-title').textContent = 'Confirm payment';
+          document.getElementById('modal-desc').textContent = `${data.quantity} credits reserved for ${data.expires_in_minutes} minutes. Confirm to complete your purchase.`;
+          btn.textContent = 'Confirm purchase →';
+          btn.disabled = false;
+        } catch(e) {
+          errEl.textContent = 'Network error. Please try again.';
+          errEl.classList.add('visible');
+          btn.disabled = false; btn.textContent = 'Reserve credits →';
+        }
+      } else if (purchaseStep === 'confirm') {
+        // Step 2: Purchase
+        btn.disabled = true; btn.textContent = 'Processing...';
+        try {
+          const r = await fetch(API + '/api/marketplace/purchase', {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reservation_ids: reservedIds })
+          });
+          const data = await r.json();
+          if (!r.ok) {
+            errEl.textContent = data.detail || 'Purchase failed. Your reservation may have expired.';
+            errEl.classList.add('visible');
+            btn.disabled = false; btn.textContent = 'Confirm purchase →';
+            return;
+          }
+          purchaseStep = 'done';
+          document.getElementById('modal-title').textContent = 'Purchase complete';
+          document.getElementById('modal-desc').textContent = '';
+          document.getElementById('modal-body').innerHTML = `
+            <div class="receipt">
+              <div class="receipt-title">✓ Carbon credits purchased</div>
+              <div class="receipt-row"><span>Transaction ID</span><span>#${data.transaction_id}</span></div>
+              <div class="receipt-row"><span>Credits purchased</span><span>${data.quantity}</span></div>
+              <div class="receipt-row"><span>Total paid</span><span>₹${data.total_inr.toLocaleString('en-IN')}</span></div>
+              <div class="receipt-row"><span>Date</span><span>${data.receipt.date}</span></div>
+              <div class="receipt-sim">SIMULATED PAYMENT — no real money was transferred</div>
+            </div>
+          `;
+          document.getElementById('modal-footer').innerHTML = `
+            <button class="btn-confirm" onclick="closeModal(); loadListings();">Done</button>
+          `;
+        } catch(e) {
+          errEl.textContent = 'Network error during purchase. Please check your purchases page — the transaction may have completed.';
+          errEl.classList.add('visible');
+          btn.disabled = false; btn.textContent = 'Retry →';
+        }
+      }
+    }
+
+    async function showPurchases() {
+      try {
+        const data = await fetch(API + '/api/marketplace/my-purchases', { credentials: 'include' }).then(r => r.json());
+        const container = document.getElementById('listings-container');
+        if (!data.purchases || data.purchases.length === 0) {
+          container.innerHTML = '<div class="empty-state"><div class="empty-title">No purchases yet</div><div class="empty-desc">Browse credits and make your first purchase.</div></div>';
+          return;
+        }
+        container.innerHTML = `<div style="margin-bottom:1rem;"><a href="/marketplace" style="font-size:12px;color:var(--green);text-decoration:none;">← Back to marketplace</a></div>` +
+          data.purchases.map(p => `
+            <div class="listing-card">
+              <div class="listing-header">
+                <div>
+                  <div class="listing-location">Purchase #${p.id}</div>
+                  <div class="listing-seller">${new Date(p.completed_at * 1000).toLocaleDateString('en-IN')}</div>
+                </div>
+                <div class="listing-badge">${p.quantity} credits</div>
+              </div>
+              <div class="listing-price">
+                <div class="listing-price-value">₹${p.total_amount_inr.toLocaleString('en-IN')}</div>
+                <span style="font-size:10px;color:var(--amber);font-weight:500;">${p.payment_method.toUpperCase()}</span>
+              </div>
+            </div>
+          `).join('');
+      } catch(e) { console.error(e); }
+    }
+
+    init();
+  </script>
+</body>
+</html>

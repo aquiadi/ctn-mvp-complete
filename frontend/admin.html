@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CTN — Admin Panel</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f5f2eb; --bg2: #eceadf; --card: #ffffff;
+      --border: rgba(0,0,0,0.1); --border2: rgba(0,0,0,0.06);
+      --text: #1a1a16; --text2: #6b6b5e; --text3: #9e9e8f;
+      --green: #2d6a4f; --green-light: #d8f3dc; --green-mid: #52b788;
+      --amber: #b5451b; --amber-light: #fde8d8;
+      --blue: #1d4e89; --blue-light: #dbeafe;
+      --red: #b91c1c; --red-light: #fee2e2;
+      --mono: 'DM Mono', monospace; --serif: 'Fraunces', serif;
+      --radius: 12px; --radius-sm: 8px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: var(--mono); background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.6; }
+    nav { display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.5rem; border-bottom: 1px solid var(--border); background: var(--bg); position: sticky; top: 0; z-index: 100; }
+    .nav-left { display: flex; align-items: center; gap: 10px; }
+    .nav-logo { font-family: var(--serif); font-size: 1.15rem; font-weight: 500; display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--text); }
+    .nav-logo-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--amber); }
+    .admin-badge { font-size: 10px; padding: 2px 8px; border-radius: 20px; background: var(--amber-light); color: var(--amber); font-weight: 500; }
+    .nav-tabs { display: flex; gap: 2px; }
+    .nav-tab { font-size: 11px; padding: 0.4rem 0.65rem; border-radius: var(--radius-sm); color: var(--text3); background: transparent; border: none; cursor: pointer; font-family: var(--mono); transition: all 0.15s; }
+    .nav-tab.active { color: var(--text); background: var(--bg2); }
+    .nav-tab:hover { color: var(--text); }
+    .nav-right { display: flex; align-items: center; gap: 8px; }
+    .btn-sm { font-size: 11px; padding: 0.35rem 0.75rem; border-radius: var(--radius-sm); font-family: var(--mono); cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text2); }
+    .main { max-width: 1000px; margin: 0 auto; padding: 1.5rem; }
+    .page-header { margin-bottom: 1.5rem; }
+    .page-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text3); margin-bottom: 0.35rem; }
+    .page-header h1 { font-family: var(--serif); font-size: clamp(1.4rem, 3vw, 2rem); font-weight: 300; }
+    .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-bottom: 1.25rem; }
+    .stat-mini { background: var(--card); border: 1px solid var(--border2); border-radius: var(--radius-sm); padding: 0.85rem; }
+    .stat-mini-value { font-family: var(--serif); font-size: 1.4rem; font-weight: 300; }
+    .stat-mini-value.green { color: var(--green); }
+    .stat-mini-value.amber { color: var(--amber); }
+    .stat-mini-label { font-size: 9px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 0.15rem; }
+    .card { background: var(--card); border: 1px solid var(--border2); border-radius: var(--radius); padding: 1.25rem; margin-bottom: 1rem; }
+    .card-title { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text3); margin-bottom: 0.75rem; }
+    .table-row { display: grid; gap: 8px; padding: 0.55rem 0; border-bottom: 1px solid var(--border2); font-size: 11px; align-items: center; }
+    .table-row:last-child { border-bottom: none; }
+    .table-row.header { font-weight: 500; color: var(--text3); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--border); }
+    .cols-4 { grid-template-columns: 2fr 1fr 1fr 1fr; }
+    .cols-5 { grid-template-columns: 1fr 2fr 1fr 1fr 1fr; }
+    .cols-log { grid-template-columns: 1.5fr 1fr 1fr 2fr; }
+    .badge { font-size: 9px; padding: 2px 7px; border-radius: 20px; font-weight: 500; text-transform: uppercase; display: inline-block; }
+    .badge-verified { background: var(--green-light); color: var(--green); }
+    .badge-pending { background: var(--amber-light); color: var(--amber); }
+    .badge-listed { background: var(--blue-light); color: var(--blue); }
+    .badge-sold { background: #f0fdf4; color: #166534; }
+    .badge-retired { background: var(--bg2); color: var(--text3); }
+    .badge-healthy { background: var(--green-light); color: var(--green); }
+    .badge-error { background: var(--red-light); color: var(--red); }
+    .section { display: none; }
+    .section.active { display: block; }
+    .health-row { display: flex; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid var(--border2); font-size: 12px; }
+    .health-row:last-child { border-bottom: none; }
+    .health-label { color: var(--text2); }
+    .health-value { color: var(--text); word-break: break-all; max-width: 60%; text-align: right; }
+    .empty-note { font-size: 12px; color: var(--text3); padding: 1.5rem 0; text-align: center; }
+    .pagination { display: flex; gap: 6px; align-items: center; margin-top: 0.5rem; }
+    .btn-page { font-size: 10px; padding: 0.3rem 0.6rem; border-radius: var(--radius-sm); font-family: var(--mono); cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text2); }
+    .btn-page:disabled { opacity: 0.3; cursor: not-allowed; }
+    .page-info { font-size: 10px; color: var(--text3); }
+    footer { border-top: 1px solid var(--border); padding: 1rem 1.5rem; font-size: 10px; color: var(--text3); text-align: center; }
+    @keyframes fadeUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+    .fade-up { animation: fadeUp 0.3s ease forwards; }
+    @media (max-width: 600px) { .nav-tabs { display: none; } .cols-4, .cols-5, .cols-log { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-left">
+      <a href="/admin" class="nav-logo"><div class="nav-logo-dot"></div> CTN</a>
+      <span class="admin-badge">Admin</span>
+      <div class="nav-tabs">
+        <button class="nav-tab active" onclick="showSection('overview')">Overview</button>
+        <button class="nav-tab" onclick="showSection('installers')">Installers</button>
+        <button class="nav-tab" onclick="showSection('credits')">Credits</button>
+        <button class="nav-tab" onclick="showSection('audit')">Audit log</button>
+        <button class="nav-tab" onclick="showSection('health')">Health</button>
+      </div>
+    </div>
+    <div class="nav-right">
+      <span style="font-size:11px;color:var(--text3);" id="admin-email">—</span>
+      <button class="btn-sm" onclick="logout()">Sign out</button>
+    </div>
+  </nav>
+
+  <div class="main">
+    <!-- OVERVIEW -->
+    <div class="section active" id="sec-overview">
+      <div class="page-header fade-up">
+        <p class="page-label">Admin Dashboard</p>
+        <h1>Platform overview</h1>
+      </div>
+      <div class="stats-row fade-up" id="overview-stats"></div>
+      <div class="card fade-up" id="overview-recent">
+        <div class="card-title">Recent audit activity</div>
+        <div id="overview-audit-list"><div class="empty-note">Loading...</div></div>
+      </div>
+    </div>
+
+    <!-- INSTALLERS -->
+    <div class="section" id="sec-installers">
+      <div class="page-header"><p class="page-label">Users</p><h1>Installers</h1></div>
+      <div class="card" id="installers-card">
+        <div class="card-title">All installer accounts</div>
+        <div id="installers-list"><div class="empty-note">Loading...</div></div>
+      </div>
+    </div>
+
+    <!-- CREDITS -->
+    <div class="section" id="sec-credits">
+      <div class="page-header"><p class="page-label">Registry</p><h1>All credits</h1></div>
+      <div class="card">
+        <div class="card-title">Credit registry</div>
+        <div id="credits-list"><div class="empty-note">Loading...</div></div>
+        <div class="pagination">
+          <button class="btn-page" onclick="loadCredits(creditsPage-1)" id="credits-prev" disabled>← prev</button>
+          <span class="page-info" id="credits-page-info"></span>
+          <button class="btn-page" onclick="loadCredits(creditsPage+1)" id="credits-next">next →</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AUDIT LOG -->
+    <div class="section" id="sec-audit">
+      <div class="page-header"><p class="page-label">Transparency</p><h1>Audit log</h1></div>
+      <div class="card">
+        <div class="card-title">Admin action history</div>
+        <div id="audit-list"><div class="empty-note">Loading...</div></div>
+        <div class="pagination">
+          <button class="btn-page" onclick="loadAudit(auditPage-1)" id="audit-prev" disabled>← prev</button>
+          <span class="page-info" id="audit-page-info"></span>
+          <button class="btn-page" onclick="loadAudit(auditPage+1)" id="audit-next">next →</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- HEALTH -->
+    <div class="section" id="sec-health">
+      <div class="page-header"><p class="page-label">System</p><h1>Health check</h1></div>
+      <div class="card" id="health-card">
+        <div class="card-title">System status</div>
+        <div id="health-list"><div class="empty-note">Checking...</div></div>
+      </div>
+    </div>
+  </div>
+
+  <footer>CTN Admin · Not linked from public site · Direct access only</footer>
+
+  <script>
+    const API = window.location.origin;
+    let creditsPage = 1, auditPage = 1;
+
+    async function checkAuth() {
+      try {
+        const r = await fetch(API + '/api/auth/me', { credentials: 'include' });
+        if (!r.ok) throw new Error();
+        const d = await r.json();
+        if (d.user.role !== 'admin') { window.location.href = '/login'; return null; }
+        return d.user;
+      } catch(e) { window.location.href = '/login'; return null; }
+    }
+
+    async function logout() {
+      await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'include' });
+      window.location.href = '/login';
+    }
+
+    function showSection(name) {
+      document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+      document.getElementById('sec-' + name).classList.add('active');
+      document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+      event.target.classList.add('active');
+      if (name === 'installers') loadInstallers();
+      if (name === 'credits') loadCredits(1);
+      if (name === 'audit') loadAudit(1);
+      if (name === 'health') loadHealth();
+    }
+
+    function ts(epoch) {
+      if (!epoch) return '—';
+      return new Date(epoch * 1000).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' });
+    }
+
+    async function init() {
+      const user = await checkAuth();
+      if (!user) return;
+      document.getElementById('admin-email').textContent = user.email;
+      loadOverview();
+    }
+
+    async function loadOverview() {
+      try {
+        const [ov, audit] = await Promise.all([
+          fetch(API + '/api/admin/overview', { credentials: 'include' }).then(r => r.json()),
+          fetch(API + '/api/admin/audit-log?limit=5', { credentials: 'include' }).then(r => r.json())
+        ]);
+        const u = ov.users, c = ov.credits, t = ov.transactions;
+        document.getElementById('overview-stats').innerHTML = `
+          <div class="stat-mini"><div class="stat-mini-value">${u.installers || 0}</div><div class="stat-mini-label">Installers</div></div>
+          <div class="stat-mini"><div class="stat-mini-value">${u.buyers || 0}</div><div class="stat-mini-label">Buyers</div></div>
+          <div class="stat-mini"><div class="stat-mini-value">${c.total || 0}</div><div class="stat-mini-label">Total credits</div></div>
+          <div class="stat-mini"><div class="stat-mini-value green">${c.verified || 0}</div><div class="stat-mini-label">Verified</div></div>
+          <div class="stat-mini"><div class="stat-mini-value">${c.listed || 0}</div><div class="stat-mini-label">Listed</div></div>
+          <div class="stat-mini"><div class="stat-mini-value amber">${c.sold || 0}</div><div class="stat-mini-label">Sold</div></div>
+          <div class="stat-mini"><div class="stat-mini-value green">₹${(t.total_inr || 0).toLocaleString('en-IN')}</div><div class="stat-mini-label">Revenue</div></div>
+        `;
+
+        if (audit.logs && audit.logs.length > 0) {
+          document.getElementById('overview-audit-list').innerHTML = audit.logs.map(l => `
+            <div class="table-row cols-log">
+              <div>${ts(l.created_at)}</div>
+              <div>${l.admin_email || '—'}</div>
+              <div><span class="badge badge-${l.action === 'mint' ? 'verified' : 'retired'}">${l.action}</span></div>
+              <div style="color:var(--text2);">${l.reason || '—'}</div>
+            </div>
+          `).join('');
+        } else {
+          document.getElementById('overview-audit-list').innerHTML = '<div class="empty-note">No audit entries yet. Admin actions will appear here.</div>';
+        }
+      } catch(e) { console.error(e); }
+    }
+
+    async function loadInstallers() {
+      try {
+        const data = await fetch(API + '/api/admin/installers', { credentials: 'include' }).then(r => r.json());
+        const list = document.getElementById('installers-list');
+        if (!data.installers || data.installers.length === 0) {
+          list.innerHTML = '<div class="empty-note">No installer accounts yet.</div>';
+          return;
+        }
+        list.innerHTML = `
+          <div class="table-row cols-4 header"><div>Email</div><div>Wallet</div><div>Credits</div><div>kWh</div></div>
+          ${data.installers.map(i => `
+            <div class="table-row cols-4">
+              <div>${i.email}</div>
+              <div style="font-size:10px;color:var(--text3);">${i.wallet_address ? i.wallet_address.slice(0,8) + '...' : 'Not linked'}</div>
+              <div>${i.credit_count}</div>
+              <div>${Math.round(i.total_kwh).toLocaleString()}</div>
+            </div>
+          `).join('')}
+        `;
+      } catch(e) { console.error(e); }
+    }
+
+    async function loadCredits(page) {
+      if (page < 1) return;
+      creditsPage = page;
+      try {
+        const data = await fetch(API + `/api/admin/credits?page=${page}&limit=30`, { credentials: 'include' }).then(r => r.json());
+        const list = document.getElementById('credits-list');
+        if (!data.credits || data.credits.length === 0) {
+          list.innerHTML = '<div class="empty-note">No credits found.</div>';
+          return;
+        }
+        list.innerHTML = `
+          <div class="table-row cols-5 header"><div>ID</div><div>Owner</div><div>kWh</div><div>CO₂</div><div>Status</div></div>
+          ${data.credits.map(c => `
+            <div class="table-row cols-5">
+              <div>#${c.credit_id}</div>
+              <div style="font-size:10px;">${c.owner_email || '—'}</div>
+              <div>${(c.total_kwh || 0).toFixed(1)}</div>
+              <div>${(c.co2_avoided_kg || 0).toFixed(1)}</div>
+              <div><span class="badge badge-${c.status}">${c.status}</span></div>
+            </div>
+          `).join('')}
+        `;
+        document.getElementById('credits-page-info').textContent = `page ${page} of ${data.pages}`;
+        document.getElementById('credits-prev').disabled = page <= 1;
+        document.getElementById('credits-next').disabled = page >= data.pages;
+      } catch(e) { console.error(e); }
+    }
+
+    async function loadAudit(page) {
+      if (page < 1) return;
+      auditPage = page;
+      try {
+        const data = await fetch(API + `/api/admin/audit-log?page=${page}&limit=20`, { credentials: 'include' }).then(r => r.json());
+        const list = document.getElementById('audit-list');
+        if (!data.logs || data.logs.length === 0) {
+          list.innerHTML = '<div class="empty-note">No audit entries yet.</div>';
+          return;
+        }
+        list.innerHTML = `
+          <div class="table-row cols-log header"><div>Timestamp</div><div>Admin</div><div>Action</div><div>Reason</div></div>
+          ${data.logs.map(l => `
+            <div class="table-row cols-log">
+              <div>${ts(l.created_at)}</div>
+              <div>${l.admin_email || '—'}</div>
+              <div>${l.action} ${l.target_type} #${l.target_id}</div>
+              <div style="color:var(--text2);font-size:10px;">${l.reason || '—'}</div>
+            </div>
+          `).join('')}
+        `;
+        document.getElementById('audit-page-info').textContent = `page ${page} of ${data.pages}`;
+        document.getElementById('audit-prev').disabled = page <= 1;
+        document.getElementById('audit-next').disabled = page >= data.pages;
+      } catch(e) { console.error(e); }
+    }
+
+    async function loadHealth() {
+      try {
+        const data = await fetch(API + '/api/admin/system-health', { credentials: 'include' }).then(r => r.json());
+        const entries = Object.entries(data).filter(([k]) => k !== 'error');
+        document.getElementById('health-list').innerHTML = entries.map(([k, v]) => {
+          let display = v;
+          if (typeof v === 'boolean') display = v ? '✓ Yes' : '✗ No';
+          if (k === 'status') display = `<span class="badge badge-${v === 'healthy' ? 'healthy' : 'error'}">${v}</span>`;
+          return `<div class="health-row"><div class="health-label">${k.replace(/_/g, ' ')}</div><div class="health-value">${display}</div></div>`;
+        }).join('');
+      } catch(e) {
+        document.getElementById('health-list').innerHTML = '<div class="empty-note" style="color:var(--red);">Failed to check system health.</div>';
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

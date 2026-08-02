@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CTN — Sign In</title>
+  <meta name="description" content="Sign in to Climate Trust Network. Track your solar carbon credits, sell on the marketplace, or purchase verified offsets.">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f5f2eb; --bg2: #eceadf; --card: #ffffff;
+      --border: rgba(0,0,0,0.1); --border2: rgba(0,0,0,0.06);
+      --text: #1a1a16; --text2: #6b6b5e; --text3: #9e9e8f;
+      --green: #2d6a4f; --green-light: #d8f3dc; --green-mid: #52b788;
+      --amber: #b5451b; --amber-light: #fde8d8;
+      --red: #b91c1c; --red-light: #fee2e2;
+      --mono: 'DM Mono', monospace; --serif: 'Fraunces', serif;
+      --radius: 12px; --radius-sm: 8px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--mono); background: var(--bg); color: var(--text);
+      min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; padding: 1.5rem;
+    }
+    .auth-container {
+      width: 100%; max-width: 400px;
+    }
+    .auth-logo {
+      font-family: var(--serif); font-size: 1.5rem; font-weight: 500;
+      letter-spacing: -0.02em; display: flex; align-items: center;
+      gap: 10px; margin-bottom: 2rem; justify-content: center;
+    }
+    .auth-logo-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--green-mid); animation: pulse 2s infinite;
+    }
+    @keyframes pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:0.6; transform:scale(1.2); } }
+    .auth-card {
+      background: var(--card); border: 1px solid var(--border2);
+      border-radius: var(--radius); padding: 2rem;
+    }
+    .auth-title {
+      font-family: var(--serif); font-size: 1.5rem; font-weight: 300;
+      line-height: 1.2; margin-bottom: 0.5rem; text-align: center;
+    }
+    .auth-subtitle {
+      font-size: 12px; color: var(--text2); text-align: center;
+      margin-bottom: 1.5rem; line-height: 1.5;
+    }
+    .tabs {
+      display: flex; gap: 0; margin-bottom: 1.5rem;
+      border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden;
+    }
+    .tab-btn {
+      flex: 1; padding: 0.6rem; font-family: var(--mono); font-size: 12px;
+      font-weight: 500; background: transparent; border: none; cursor: pointer;
+      color: var(--text3); transition: all 0.2s;
+    }
+    .tab-btn.active { background: var(--text); color: var(--bg); }
+    .field { margin-bottom: 1rem; }
+    .field label {
+      display: block; font-size: 11px; letter-spacing: 0.06em;
+      text-transform: uppercase; color: var(--text3); margin-bottom: 0.4rem;
+    }
+    .field input, .field select {
+      width: 100%; padding: 0.65rem 0.875rem; border: 1px solid var(--border);
+      border-radius: var(--radius-sm); font-family: var(--mono); font-size: 13px;
+      background: var(--bg); color: var(--text); outline: none; transition: border-color 0.2s;
+    }
+    .field input:focus, .field select:focus { border-color: var(--green-mid); }
+    .field select { appearance: none; cursor: pointer; }
+    .btn {
+      width: 100%; padding: 0.75rem; border-radius: var(--radius-sm);
+      font-family: var(--mono); font-size: 13px; font-weight: 500;
+      cursor: pointer; border: none; background: var(--text); color: var(--bg);
+      transition: opacity 0.2s, transform 0.1s; margin-top: 0.5rem;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .error-msg {
+      background: var(--red-light); border: 1px solid rgba(185,28,28,0.2);
+      border-radius: var(--radius-sm); padding: 0.65rem 0.875rem;
+      font-size: 12px; color: var(--red); margin-bottom: 1rem;
+      display: none; line-height: 1.5;
+    }
+    .error-msg.visible { display: block; }
+    .success-msg {
+      background: var(--green-light); border: 1px solid rgba(45,106,79,0.2);
+      border-radius: var(--radius-sm); padding: 0.65rem 0.875rem;
+      font-size: 12px; color: var(--green); margin-bottom: 1rem;
+      display: none; line-height: 1.5;
+    }
+    .success-msg.visible { display: block; }
+    .auth-footer {
+      text-align: center; margin-top: 1.5rem; font-size: 12px; color: var(--text3);
+    }
+    .auth-footer a { color: var(--green); text-decoration: none; }
+    .auth-footer a:hover { text-decoration: underline; }
+    .role-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 1rem; }
+    .role-card {
+      padding: 1rem 0.75rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
+      cursor: pointer; text-align: center; transition: all 0.2s; background: transparent;
+      font-family: var(--mono);
+    }
+    .role-card:hover { border-color: var(--green-mid); }
+    .role-card.selected { border-color: var(--green); background: var(--green-light); }
+    .role-card-icon { font-size: 1.25rem; margin-bottom: 0.35rem; }
+    .role-card-label { font-size: 12px; font-weight: 500; color: var(--text); }
+    .role-card-desc { font-size: 10px; color: var(--text2); margin-top: 0.25rem; line-height: 1.3; }
+    @keyframes fadeUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
+    .fade-up { animation: fadeUp 0.4s ease forwards; }
+  </style>
+</head>
+<body>
+  <div class="auth-container fade-up">
+    <div class="auth-logo">
+      <div class="auth-logo-dot"></div>
+      CTN
+    </div>
+
+    <div class="auth-card">
+      <div class="tabs" id="auth-tabs">
+        <button class="tab-btn active" onclick="switchMode('login')" id="tab-login">Sign in</button>
+        <button class="tab-btn" onclick="switchMode('signup')" id="tab-signup">Create account</button>
+      </div>
+
+      <div id="error-box" class="error-msg"></div>
+      <div id="success-box" class="success-msg"></div>
+
+      <!-- LOGIN FORM -->
+      <form id="login-form" onsubmit="handleLogin(event)">
+        <h2 class="auth-title">Welcome back</h2>
+        <p class="auth-subtitle">Sign in to your CTN account</p>
+        <div class="field">
+          <label for="login-email">Email</label>
+          <input type="email" id="login-email" placeholder="you@example.com" required autocomplete="email">
+        </div>
+        <div class="field">
+          <label for="login-password">Password</label>
+          <input type="password" id="login-password" placeholder="••••••••" required autocomplete="current-password">
+        </div>
+        <button type="submit" class="btn" id="login-btn">Sign in →</button>
+      </form>
+
+      <!-- SIGNUP FORM -->
+      <form id="signup-form" onsubmit="handleSignup(event)" style="display:none;">
+        <h2 class="auth-title">Join CTN</h2>
+        <p class="auth-subtitle">Create an account to start earning or buying carbon credits</p>
+        <div class="field">
+          <label>I want to</label>
+          <div class="role-cards">
+            <div class="role-card selected" onclick="selectRole('installer')" id="role-installer">
+              <div class="role-card-icon">☀</div>
+              <div class="role-card-label">Earn credits</div>
+              <div class="role-card-desc">I own/operate solar panels</div>
+            </div>
+            <div class="role-card" onclick="selectRole('buyer')" id="role-buyer">
+              <div class="role-card-icon">↗</div>
+              <div class="role-card-label">Buy credits</div>
+              <div class="role-card-desc">I want to offset emissions</div>
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          <label for="signup-email">Email</label>
+          <input type="email" id="signup-email" placeholder="you@example.com" required autocomplete="email">
+        </div>
+        <div class="field">
+          <label for="signup-password">Password</label>
+          <input type="password" id="signup-password" placeholder="At least 8 characters" required minlength="8" autocomplete="new-password">
+        </div>
+        <button type="submit" class="btn" id="signup-btn">Create account →</button>
+      </form>
+    </div>
+
+    <div class="auth-footer">
+      <a href="/">← Back to CTN home</a>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = window.location.origin;
+    let selectedRole = 'installer';
+
+    // Pre-fill role from query param
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('role') === 'buyer') {
+      selectedRole = 'buyer';
+    }
+    if (params.get('mode') === 'signup') {
+      switchMode('signup');
+    }
+
+    // Check if already logged in
+    (async function checkAuth() {
+      try {
+        const r = await fetch(API_BASE + '/api/auth/me', { credentials: 'include' });
+        if (r.ok) {
+          const data = await r.json();
+          redirectForRole(data.user.role);
+        }
+      } catch(e) {}
+    })();
+
+    function redirectForRole(role) {
+      const returnTo = params.get('return');
+      if (returnTo) { window.location.href = returnTo; return; }
+      if (role === 'installer') window.location.href = '/app';
+      else if (role === 'buyer') window.location.href = '/marketplace';
+      else if (role === 'admin') window.location.href = '/admin';
+    }
+
+    function switchMode(mode) {
+      document.getElementById('login-form').style.display = mode === 'login' ? 'block' : 'none';
+      document.getElementById('signup-form').style.display = mode === 'signup' ? 'block' : 'none';
+      document.getElementById('tab-login').classList.toggle('active', mode === 'login');
+      document.getElementById('tab-signup').classList.toggle('active', mode === 'signup');
+      hideError(); hideSuccess();
+    }
+
+    function selectRole(role) {
+      selectedRole = role;
+      document.getElementById('role-installer').classList.toggle('selected', role === 'installer');
+      document.getElementById('role-buyer').classList.toggle('selected', role === 'buyer');
+    }
+
+    function showError(msg) {
+      const el = document.getElementById('error-box');
+      el.textContent = msg; el.classList.add('visible');
+    }
+    function hideError() { document.getElementById('error-box').classList.remove('visible'); }
+    function showSuccess(msg) {
+      const el = document.getElementById('success-box');
+      el.textContent = msg; el.classList.add('visible');
+    }
+    function hideSuccess() { document.getElementById('success-box').classList.remove('visible'); }
+
+    async function handleLogin(e) {
+      e.preventDefault(); hideError(); hideSuccess();
+      const btn = document.getElementById('login-btn');
+      btn.disabled = true; btn.textContent = 'Signing in...';
+      try {
+        const r = await fetch(API_BASE + '/api/auth/login', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: document.getElementById('login-email').value,
+            password: document.getElementById('login-password').value
+          })
+        });
+        const data = await r.json();
+        if (!r.ok) { showError(data.detail || 'Login failed'); return; }
+        redirectForRole(data.user.role);
+      } catch(e) {
+        showError('Network error — please try again.');
+      } finally {
+        btn.disabled = false; btn.textContent = 'Sign in →';
+      }
+    }
+
+    async function handleSignup(e) {
+      e.preventDefault(); hideError(); hideSuccess();
+      const btn = document.getElementById('signup-btn');
+      btn.disabled = true; btn.textContent = 'Creating account...';
+      try {
+        const r = await fetch(API_BASE + '/api/auth/signup', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: document.getElementById('signup-email').value,
+            password: document.getElementById('signup-password').value,
+            role: selectedRole
+          })
+        });
+        const data = await r.json();
+        if (!r.ok) {
+          const detail = data.detail;
+          if (typeof detail === 'object' && Array.isArray(detail)) {
+            showError(detail.map(d => d.msg).join('. '));
+          } else {
+            showError(detail || 'Signup failed');
+          }
+          return;
+        }
+        redirectForRole(data.user.role);
+      } catch(e) {
+        showError('Network error — please try again.');
+      } finally {
+        btn.disabled = false; btn.textContent = 'Create account →';
+      }
+    }
+
+    // Apply initial role from URL
+    if (params.get('role')) selectRole(params.get('role'));
+    if (params.get('mode') === 'signup') switchMode('signup');
+  </script>
+</body>
+</html>

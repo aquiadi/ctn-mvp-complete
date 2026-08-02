@@ -1,19 +1,64 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-import requests
+from fastapi.responses import FileResponse, HTMLResponse
+from contextlib import asynccontextmanager
+import requests as http_requests
 import json
 from web3 import Web3
 import os
 import hashlib
+import asyncio
 
-app = FastAPI(title="CTN API", version="1.0")
+from database import database, init_db, shutdown_db
+from auth import require_admin, get_current_user
+from routes.auth_routes import router as auth_router
+from routes.installer_routes import router as installer_router
+from routes.admin_routes import router as admin_router
+from routes.marketplace_routes import router as marketplace_router
+
+# ── Rate limiting ──────────────────────────────────────────────────────────
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
+
+
+# ── App lifecycle ──────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    # Start background task for stale reservation cleanup
+    cleanup_task = asyncio.create_task(reservation_cleanup_loop())
+    yield
+    cleanup_task.cancel()
+    await shutdown_db()
+
+
+app = FastAPI(title="CTN API", version="2.0", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# ── CORS — locked to known origins ────────────────────────────────────────
+
+ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000,http://localhost:3000").split(",")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"]
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,  # Required for httpOnly cookie transport
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Content-Type", "Accept"],
 )
+
+# ── Mount route modules ───────────────────────────────────────────────────
+
+app.include_router(auth_router)
+app.include_router(installer_router)
+app.include_router(admin_router)
+app.include_router(marketplace_router)
 
 # ── Config ─────────────────────────────────────────────────────────────────
 
@@ -31,7 +76,7 @@ EXPLORER = "https://amoy.polygonscan.com"
 
 def load_credits_from_ipfs():
     try:
-        r = requests.get(IPFS_URL, timeout=30)
+        r = http_requests.get(IPFS_URL, timeout=30)
         data = r.json()
         if isinstance(data, list):
             return data
@@ -76,13 +121,63 @@ def calculate_stats():
         "explorer": f"{EXPLORER}/address/{CONTRACT_ADDRESS}"
     }
 
-# ── Routes ─────────────────────────────────────────────────────────────────
+# ── Stale reservation cleanup ─────────────────────────────────────────────
+
+RESERVATION_TIMEOUT_MINUTES = 15
+
+async def reservation_cleanup_loop():
+    """Background task: release stale reservations every 5 minutes."""
+    import time
+    while True:
+        try:
+            await asyncio.sleep(300)  # 5 minutes
+            cutoff = time.time() - (RESERVATION_TIMEOUT_MINUTES * 60)
+            result = await database.execute(
+                query="""UPDATE credits SET status = 'listed', reserved_by = NULL, reserved_at = NULL
+                         WHERE status = 'reserved' AND reserved_at < :cutoff""",
+                values={"cutoff": cutoff}
+            )
+            if result and result > 0:
+                print(f"✓ Released {result} stale reservation(s)")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"⚠ Reservation cleanup error: {e}")
+
+# ── Public read-only routes (unchanged response shapes) ────────────────────
+
+import os
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 
 @app.get("/")
 def root():
+    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+
+@app.get("/login")
+def login_page():
+    return FileResponse(os.path.join(FRONTEND_DIR, "login.html"))
+
+@app.get("/app")
+def app_page():
+    return FileResponse(os.path.join(FRONTEND_DIR, "app.html"))
+
+@app.get("/app/history")
+def app_history_page():
+    return FileResponse(os.path.join(FRONTEND_DIR, "app-history.html"))
+
+@app.get("/admin")
+def admin_page():
+    return FileResponse(os.path.join(FRONTEND_DIR, "admin.html"))
+
+@app.get("/marketplace")
+def marketplace_page():
+    return FileResponse(os.path.join(FRONTEND_DIR, "marketplace.html"))
+
+@app.get("/api")
+def api_root():
     return {
         "name": "CTN API",
-        "version": "1.0",
+        "version": "2.0",
         "credits_loaded": len(CREDITS),
         "docs": "/docs"
     }
@@ -264,6 +359,27 @@ ABI = [
         "stateMutability": "nonpayable",
         "type": "function"
     },
+    # ── New functions from Stage C.5 contract upgrade ──
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "creditId", "type": "uint256"},
+            {"internalType": "address", "name": "newHolder", "type": "address"}
+        ],
+        "name": "transferCredit",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "creditId", "type": "uint256"}
+        ],
+        "name": "retireCreditFor",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    # ── Events ──
     {
         "anonymous": False,
         "inputs": [
@@ -281,6 +397,15 @@ ABI = [
             {"indexed": False, "internalType": "address", "name": "holder", "type": "address"}
         ],
         "name": "CreditRetired",
+        "type": "event"
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "internalType": "uint256", "name": "id", "type": "uint256"},
+            {"indexed": False, "internalType": "address", "name": "newHolder", "type": "address"}
+        ],
+        "name": "CreditTransferred",
         "type": "event"
     }
 ]
@@ -321,15 +446,22 @@ def upload_credit_to_ipfs(credit: dict) -> str:
         "pinataContent": credit,
         "pinataMetadata": {"name": f"credit_{credit['credit_id']}"}
     }
-    r = requests.post(url, json=payload, headers=headers)
+    r = http_requests.post(url, json=payload, headers=headers)
     return r.json()["IpfsHash"]
 
-# ── Mint a single credit on blockchain ───────────────────────────────────
+# ── Mint a single credit on blockchain — NOW AUTH-GATED (admin only) ─────
 
 @app.post("/mint/{credit_id}")
-def mint_credit(credit_id: int, recipient: str):
+@limiter.limit("2/minute")
+async def mint_credit(
+    request: Request,
+    credit_id: int,
+    recipient: str,
+    admin: dict = Depends(require_admin)
+):
     """
     Mint a specific credit on blockchain.
+    REQUIRES ADMIN AUTH — no longer publicly accessible.
     recipient = wallet address to receive the credit
     """
 
@@ -382,7 +514,7 @@ def mint_credit(credit_id: int, recipient: str):
         "verify_ipfs": f"https://gateway.pinata.cloud/ipfs/{individual_hash}"
     }
 
-# ── Verify credit on blockchain ───────────────────────────────────────────
+# ── Verify credit on blockchain (read-only — stays public) ───────────────
 
 @app.get("/verify/{credit_id}")
 def verify_on_chain(credit_id: int):
@@ -407,11 +539,19 @@ def verify_on_chain(credit_id: int):
     except Exception as e:
         return {"credit_id": credit_id, "on_chain": False, "error": str(e)}
 
-# ── Retire credit on blockchain ───────────────────────────────────────────
+# ── Retire credit on blockchain — NOW AUTH-GATED (admin only) ─────────────
 
 @app.post("/retire/{credit_id}")
-def retire_credit(credit_id: int):
-    """Permanently retire a credit — marks it as offset on-chain"""
+@limiter.limit("2/minute")
+async def retire_credit(
+    request: Request,
+    credit_id: int,
+    admin: dict = Depends(require_admin)
+):
+    """
+    Permanently retire a credit — marks it as offset on-chain.
+    REQUIRES ADMIN AUTH — no longer publicly accessible.
+    """
     try:
         account = w3.eth.account.from_key(PRIVATE_KEY)
         

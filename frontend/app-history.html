@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CTN — Credit History</title>
+  <meta name="description" content="View your complete carbon credit history and payout records.">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f5f2eb; --bg2: #eceadf; --card: #ffffff;
+      --border: rgba(0,0,0,0.1); --border2: rgba(0,0,0,0.06);
+      --text: #1a1a16; --text2: #6b6b5e; --text3: #9e9e8f;
+      --green: #2d6a4f; --green-light: #d8f3dc; --green-mid: #52b788;
+      --amber: #b5451b; --amber-light: #fde8d8;
+      --blue: #1d4e89; --blue-light: #dbeafe;
+      --mono: 'DM Mono', monospace; --serif: 'Fraunces', serif;
+      --radius: 12px; --radius-sm: 8px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: var(--mono); background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.6; }
+    nav { display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.5rem; border-bottom: 1px solid var(--border); background: var(--bg); position: sticky; top: 0; z-index: 100; }
+    .nav-left { display: flex; align-items: center; gap: 10px; }
+    .nav-logo { font-family: var(--serif); font-size: 1.15rem; font-weight: 500; letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--text); }
+    .nav-logo-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green-mid); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:0.6; transform:scale(1.2); } }
+    .nav-links { display: flex; gap: 4px; }
+    .nav-link { font-size: 12px; padding: 0.4rem 0.75rem; border-radius: var(--radius-sm); color: var(--text2); text-decoration: none; transition: all 0.15s; }
+    .nav-link:hover { color: var(--text); background: var(--bg2); }
+    .nav-link.active { color: var(--text); background: var(--bg2); }
+    .nav-right { display: flex; align-items: center; gap: 10px; }
+    .nav-user { font-size: 11px; color: var(--text3); }
+    .btn-sm { font-size: 11px; padding: 0.35rem 0.75rem; border-radius: var(--radius-sm); font-family: var(--mono); cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text2); }
+    .main { max-width: 900px; margin: 0 auto; padding: 1.5rem; }
+    .page-header { margin-bottom: 1.5rem; }
+    .page-header h1 { font-family: var(--serif); font-size: clamp(1.5rem, 4vw, 2rem); font-weight: 300; line-height: 1.15; letter-spacing: -0.02em; }
+    .page-header h1 em { font-style: italic; color: var(--green); }
+    .page-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text3); margin-bottom: 0.35rem; }
+    .summary-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 1.5rem; }
+    .summary-card { background: var(--card); border: 1px solid var(--border2); border-radius: var(--radius); padding: 1rem; }
+    .summary-value { font-family: var(--serif); font-size: 1.5rem; font-weight: 300; }
+    .summary-value.green { color: var(--green); }
+    .summary-label { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 0.25rem; }
+    .card { background: var(--card); border: 1px solid var(--border2); border-radius: var(--radius); padding: 1.25rem; margin-bottom: 1.25rem; }
+    .card-title { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text3); margin-bottom: 1rem; }
+    .history-item { display: flex; align-items: center; justify-content: space-between; padding: 0.65rem 0; border-bottom: 1px solid var(--border2); font-size: 12px; }
+    .history-item:last-child { border-bottom: none; }
+    .history-id { font-size: 10px; color: var(--text3); }
+    .history-kwh { font-weight: 500; }
+    .badge { font-size: 9px; padding: 2px 8px; border-radius: 20px; font-weight: 500; text-transform: uppercase; }
+    .badge-sold { background: #f0fdf4; color: #166534; }
+    .badge-retired { background: var(--bg2); color: var(--text3); }
+    .badge-verified { background: var(--green-light); color: var(--green); }
+    .badge-listed { background: var(--blue-light); color: var(--blue); }
+    .badge-pending { background: var(--amber-light); color: var(--amber); }
+    .badge-reserved { background: #fef3c7; color: #92400e; }
+    .pagination { display: flex; gap: 8px; align-items: center; margin-top: 0.75rem; }
+    .btn-page { font-size: 11px; padding: 0.35rem 0.75rem; border-radius: var(--radius-sm); font-family: var(--mono); cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text2); }
+    .btn-page:disabled { opacity: 0.3; cursor: not-allowed; }
+    .page-info { font-size: 10px; color: var(--text3); }
+    .empty-state { text-align: center; padding: 3rem 1rem; }
+    .empty-title { font-family: var(--serif); font-size: 1.1rem; font-weight: 400; margin-bottom: 0.5rem; }
+    .empty-desc { font-size: 12px; color: var(--text2); max-width: 300px; margin: 0 auto; line-height: 1.5; }
+    footer { border-top: 1px solid var(--border); padding: 1.25rem 1.5rem; font-size: 10px; color: var(--text3); text-align: center; }
+    .tabs-filter { display: flex; gap: 4px; margin-bottom: 1rem; }
+    .tab-filter { font-size: 11px; padding: 0.35rem 0.65rem; border-radius: 20px; font-family: var(--mono); cursor: pointer; border: 1px solid var(--border2); background: transparent; color: var(--text3); transition: all 0.15s; }
+    .tab-filter.active { background: var(--text); color: var(--bg); border-color: var(--text); }
+    @keyframes fadeUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
+    .fade-up { animation: fadeUp 0.4s ease forwards; }
+    @media (max-width: 600px) { .nav-links { display: none; } }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-left">
+      <a href="/" class="nav-logo"><div class="nav-logo-dot"></div> CTN</a>
+      <div class="nav-links">
+        <a href="/app" class="nav-link">Dashboard</a>
+        <a href="/app/history" class="nav-link active">History</a>
+      </div>
+    </div>
+    <div class="nav-right">
+      <span class="nav-user" id="nav-user">—</span>
+      <button class="btn-sm" onclick="logout()">Sign out</button>
+    </div>
+  </nav>
+
+  <div class="main">
+    <div class="page-header fade-up">
+      <p class="page-label">Credit History</p>
+      <h1>Your complete<br><em>credit record.</em></h1>
+    </div>
+
+    <div class="summary-row fade-up" id="summary-row">
+      <div class="summary-card">
+        <div class="summary-value green" id="total-earned-inr">—</div>
+        <div class="summary-label">Total earned (INR)</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-value" id="total-sold">—</div>
+        <div class="summary-label">Credits sold</div>
+      </div>
+    </div>
+
+    <div class="card fade-up">
+      <div class="card-title">All credits</div>
+      <div class="tabs-filter" id="status-tabs">
+        <button class="tab-filter active" onclick="filterStatus(null, this)">All</button>
+        <button class="tab-filter" onclick="filterStatus('verified', this)">Verified</button>
+        <button class="tab-filter" onclick="filterStatus('listed', this)">Listed</button>
+        <button class="tab-filter" onclick="filterStatus('sold', this)">Sold</button>
+        <button class="tab-filter" onclick="filterStatus('retired', this)">Retired</button>
+      </div>
+      <div id="credits-list"></div>
+      <div class="pagination">
+        <button class="btn-page" onclick="changePage(-1)" id="prev-btn" disabled>← prev</button>
+        <span class="page-info" id="page-info"></span>
+        <button class="btn-page" onclick="changePage(1)" id="next-btn">next →</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>CTN · Climate Trust Network · Simulated data from Patna, Bihar, India</footer>
+
+  <script>
+    const API = window.location.origin;
+    let currentPage = 1;
+    let currentFilter = null;
+    let totalPages = 1;
+    const PAGE_SIZE = 20;
+
+    async function checkAuth() {
+      try {
+        const r = await fetch(API + '/api/auth/me', { credentials: 'include' });
+        if (!r.ok) throw new Error();
+        const d = await r.json();
+        if (d.user.role !== 'installer') { window.location.href = '/login'; return null; }
+        return d.user;
+      } catch(e) { window.location.href = '/login?return=/app/history'; return null; }
+    }
+
+    async function logout() {
+      await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'include' });
+      window.location.href = '/login';
+    }
+
+    async function init() {
+      const user = await checkAuth();
+      if (!user) return;
+      document.getElementById('nav-user').textContent = user.email;
+
+      // Load history summary
+      try {
+        const hist = await fetch(API + '/api/installer/history', { credentials: 'include' }).then(r => r.json());
+        document.getElementById('total-earned-inr').textContent = '₹' + hist.total_earned_inr.toLocaleString('en-IN');
+        document.getElementById('total-sold').textContent = hist.total;
+      } catch(e) {}
+
+      loadCredits();
+    }
+
+    async function loadCredits() {
+      let url = API + `/api/installer/credits?page=${currentPage}&limit=${PAGE_SIZE}`;
+      if (currentFilter) url += `&status_filter=${currentFilter}`;
+      try {
+        const data = await fetch(url, { credentials: 'include' }).then(r => r.json());
+        totalPages = data.pages || 1;
+        renderCredits(data);
+      } catch(e) { console.error(e); }
+    }
+
+    function renderCredits(data) {
+      const list = document.getElementById('credits-list');
+      if (!data.credits || data.credits.length === 0) {
+        list.innerHTML = '<div class="empty-state"><div class="empty-title">No credits found</div><div class="empty-desc">Try a different filter or check back later.</div></div>';
+        return;
+      }
+      list.innerHTML = data.credits.map(c => `
+        <div class="history-item">
+          <div>
+            <div class="history-id">#${c.credit_id} · ${c.device_id || ''} · ${(c.period_start || '').slice(0, 10)}</div>
+            <div class="history-kwh">${(c.total_kwh || 0).toFixed(2)} kWh · ${(c.co2_avoided_kg || 0).toFixed(1)} kg CO₂</div>
+          </div>
+          <span class="badge badge-${c.status}">${c.status}</span>
+        </div>
+      `).join('');
+
+      document.getElementById('page-info').textContent = `page ${currentPage} of ${totalPages}`;
+      document.getElementById('prev-btn').disabled = currentPage <= 1;
+      document.getElementById('next-btn').disabled = currentPage >= totalPages;
+    }
+
+    function filterStatus(status, btn) {
+      currentFilter = status;
+      currentPage = 1;
+      document.querySelectorAll('.tab-filter').forEach(t => t.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      loadCredits();
+    }
+
+    function changePage(dir) {
+      const next = currentPage + dir;
+      if (next < 1 || next > totalPages) return;
+      currentPage = next;
+      loadCredits();
+    }
+
+    init();
+  </script>
+</body>
+</html>
