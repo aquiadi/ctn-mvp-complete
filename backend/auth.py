@@ -66,6 +66,9 @@ def clear_auth_cookie(response: Response):
         key=COOKIE_NAME,
         path="/",
         domain=COOKIE_DOMAIN,
+        secure=COOKIE_SECURE,
+        httponly=True,
+        samesite="none",
     )
 
 
