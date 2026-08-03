@@ -216,7 +216,7 @@
 
     async function logout() {
       await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'include' });
-      window.location.href = '/login';
+      window.location.href = '/';
     }
 
     // ── Init ──
