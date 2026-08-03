@@ -215,8 +215,13 @@
     }
 
     async function logout() {
-      await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'include' });
-      window.location.href = '/';
+      try {
+        await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'include' });
+      } catch (e) {
+        console.warn('Logout API call failed:', e);
+      }
+      // Force hard navigation to clear any client-side state
+      window.location.href = '/?logged_out=1';
     }
 
     // ── Init ──

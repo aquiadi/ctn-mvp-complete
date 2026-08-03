@@ -1065,6 +1065,19 @@
       return r.json();
     }
 
+    // Handle post-logout redirect: if logged_out=1, verify session is cleared
+    if (new URLSearchParams(window.location.search).has('logged_out')) {
+      try {
+        const r = await fetch(API_BASE + '/api/auth/me', { credentials: 'include' });
+        if (r.ok) {
+          // Session still valid? Force logout again
+          await fetch(API_BASE + '/api/auth/logout', { method: 'POST', credentials: 'include' });
+        }
+      } catch (e) {}
+      // Clean URL
+      window.history.replaceState({}, '', '/');
+    }
+
     let creditsCurPage = 1;
     const CREDITS_PAGE_SIZE = 8;
     let creditsTotalCount = 0;
