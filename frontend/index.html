@@ -1182,14 +1182,20 @@
 
         if (data.on_chain) {
           box.innerHTML = `
-          <div style="font-weight:500;margin-bottom:8px;font-size:13px;">✓ Credit #${creditId} is on-chain</div>
+          <div style="font-weight:500;margin-bottom:8px;font-size:13px;">✓ Credit #${creditId} is verified on-chain</div>
           <div style="margin-bottom:4px;">Energy: ${data.energy_kwh} kWh · CO₂: ${data.co2_avoided_kg} kg</div>
           <div style="margin-bottom:4px;">Holder: ${(data.holder || '').slice(0, 10)}…${(data.holder || '').slice(-4)}</div>
           <div style="margin-bottom:4px;">Retired: ${data.retired ? 'Yes' : 'No'}</div>
-          <div><a href="${data.polygonscan}" target="_blank" rel="noopener" style="color:var(--blue);">View on Polygonscan ↗</a></div>
+          <div style="margin-bottom:4px;"><a href="${data.verify_ipfs}" target="_blank" rel="noopener" style="color:var(--blue);">View on IPFS ↗</a>
+           · <a href="${data.polygonscan}" target="_blank" rel="noopener" style="color:var(--blue);">Polygonscan ↗</a></div>
         `;
         } else {
-          box.innerHTML = `<div>Credit #${creditId} not found on chain yet.</div>`;
+          box.innerHTML = `
+          <div style="font-weight:500;margin-bottom:8px;font-size:13px;">✓ Credit #${creditId} found in IPFS dataset</div>
+          <div style="margin-bottom:4px;">Energy: ${data.energy_kwh} kWh · CO₂: ${data.co2_avoided_kg} kg</div>
+          <div style="margin-bottom:4px;color:var(--text3);font-size:11px;">Not yet minted on blockchain</div>
+          <div><a href="${data.ipfs_master}" target="_blank" rel="noopener" style="color:var(--blue);">View IPFS source ↗</a></div>
+        `;
         }
       } catch (e) {
         box.textContent = 'Verification failed: ' + e.message;
