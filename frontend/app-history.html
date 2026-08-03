@@ -178,7 +178,7 @@
       list.innerHTML = data.credits.map(c => `
         <div class="history-item">
           <div>
-            <div class="history-id">#${c.credit_id} · ${c.device_id || ''} · ${(c.period_start || '').slice(0, 10)}</div>
+            <div class="history-id">#${c.credit_id} · ${c.device_id || ''} · ${(c.period_start || '').slice(0, 16)}</div>
             <div class="history-kwh">${(c.total_kwh || 0).toFixed(2)} kWh · ${(c.co2_avoided_kg || 0).toFixed(1)} kg CO₂</div>
           </div>
           <span class="badge badge-${c.status}">${c.status}</span>

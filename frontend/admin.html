@@ -46,7 +46,8 @@
     .table-row:last-child { border-bottom: none; }
     .table-row.header { font-weight: 500; color: var(--text3); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--border); }
     .cols-4 { grid-template-columns: 2fr 1fr 1fr 1fr; }
-    .cols-5 { grid-template-columns: 1fr 2fr 1fr 1fr 1fr; }
+    .cols-5 { grid-template-columns: 1.5fr 2fr 1fr 1fr 1fr; }
+    .cols-6 { grid-template-columns: 1fr 1fr 1.5fr 1fr 1fr 1fr; }
     .cols-log { grid-template-columns: 1.5fr 1fr 1fr 2fr; }
     .badge { font-size: 9px; padding: 2px 7px; border-radius: 20px; font-weight: 500; text-transform: uppercase; display: inline-block; }
     .badge-verified { background: var(--green-light); color: var(--green); }
@@ -262,14 +263,17 @@
           return;
         }
         list.innerHTML = `
-          <div class="table-row cols-5 header"><div>ID</div><div>Owner</div><div>kWh</div><div>CO₂</div><div>Status</div></div>
+          <div class="table-row cols-6 header"><div>ID</div><div>Owner</div><div>Generated On</div><div>kWh</div><div>Status</div><div>Action</div></div>
           ${data.credits.map(c => `
-            <div class="table-row cols-5">
+            <div class="table-row cols-6">
               <div>#${c.credit_id}</div>
               <div style="font-size:10px;">${c.owner_email || '—'}</div>
+              <div>${c.timestamp || '—'}</div>
               <div>${(c.total_kwh || 0).toFixed(1)}</div>
-              <div>${(c.co2_avoided_kg || 0).toFixed(1)}</div>
               <div><span class="badge badge-${c.status}">${c.status}</span></div>
+              <div>
+                ${c.status === 'verified' ? `<button class="btn-sm" onclick="mintCredit(${c.credit_id})">Mint</button>` : '—'}
+              </div>
             </div>
           `).join('')}
         `;
@@ -277,6 +281,29 @@
         document.getElementById('credits-prev').disabled = page <= 1;
         document.getElementById('credits-next').disabled = page >= data.pages;
       } catch(e) { console.error(e); }
+    }
+
+    async function mintCredit(creditId) {
+      if (!confirm(`Are you sure you want to mint credit #${creditId}?`)) return;
+      try {
+        const res = await fetch(API + `/api/admin/mint/${creditId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ reason: "Manual mint from Admin panel" })
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          alert('Minting failed: ' + (err.detail || 'Unknown error'));
+          return;
+        }
+        alert(`Successfully minted credit #${creditId}`);
+        loadCredits(creditsPage);
+        loadOverview();
+      } catch(e) {
+        alert('Error minting credit');
+        console.error(e);
+      }
     }
 
     async function loadAudit(page) {

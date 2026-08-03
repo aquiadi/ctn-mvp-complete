@@ -1131,7 +1131,7 @@
         `<a href="${stats.ipfs_master || '#'}" target="_blank" rel="noopener">${(stats.ipfs_master || '').replace('https://', '').slice(0, 36)}… ↗</a>`;
       document.getElementById('proof-device').textContent = stats.device_id || '—';
       document.getElementById('proof-period').textContent =
-        (stats.period_start || '').slice(0, 10) + ' → ' + (stats.period_end || '').slice(0, 10);
+        (stats.period_start || '').slice(0, 16) + ' → ' + (stats.period_end || '').slice(0, 16);
     }
 
     function populateCredits(data) {
@@ -1155,7 +1155,7 @@
         <div class="credit-row" onclick="pickCredit(${c.credit_id})" title="Click to verify #${c.credit_id}">
           <div class="credit-row-left">
             <span class="credit-row-id">#${c.credit_id}</span>
-            <span class="credit-row-date">${(c.period_end || c.timestamp || '').slice(0, 10)}</span>
+            <span class="credit-row-date">${(c.period_end || c.timestamp || '').slice(0, 16)}</span>
           </div>
           <span class="credit-row-kwh">${(c.total_kwh || 0).toFixed(1)} kWh</span>
         </div>
