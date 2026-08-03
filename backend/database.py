@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS devices (
 
 CREATE TABLE IF NOT EXISTS credits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    credit_id INTEGER NOT NULL,
+    credit_id INTEGER UNIQUE NOT NULL,
     device_id TEXT,
     owner_user_id INTEGER REFERENCES users(id),
     total_kwh REAL NOT NULL DEFAULT 0,
@@ -223,16 +223,12 @@ async def init_db():
         )
         print("✓ Seeded demo device: 1BY6WEcLGh8j5v7")
 
-    # Seed credits from IPFS data (if credits table is empty)
-    existing_credits = await database.fetch_one(
-        query="SELECT COUNT(*) as cnt FROM credits"
-    )
-    if existing_credits["cnt"] == 0:
-        await seed_credits_from_ipfs(demo_user_id)
+    # Sync credits from IPFS data (single source of truth)
+    await sync_credits_from_ipfs(demo_user_id)
 
 
-async def seed_credits_from_ipfs(owner_user_id):
-    """Seed credits table from the IPFS-loaded data."""
+async def sync_credits_from_ipfs(owner_user_id):
+    """Sync credits table from the IPFS-loaded data, acting as single source of truth."""
     import requests as req
 
     IPFS_URL = "https://ivory-geographical-lungfish-400.mypinata.cloud/ipfs/bafybeifpn7y2r2rsjtvm4hun3dy63jkp5ah7qxfwhk5u6bemkapmis2qku"
@@ -244,34 +240,57 @@ async def seed_credits_from_ipfs(owner_user_id):
 
         from data_utils import parse_discrete_credits
         credits_list = parse_discrete_credits(credits_list)
+        
+        # Load existing credits into memory for fast diffing
+        existing_rows = await database.fetch_all("SELECT credit_id, total_kwh, co2_avoided_kg FROM credits")
+        existing_map = {row["credit_id"]: row for row in existing_rows}
+        
+        inserts = 0
+        updates = 0
 
         for c in credits_list:
-            await database.execute(
-                query="""INSERT INTO credits 
-                    (credit_id, device_id, owner_user_id, total_kwh, co2_avoided_kg,
-                     timestamp, period_start, period_end, methodology, standard,
-                     location, signature, status, contract_version)
-                    VALUES (:credit_id, :device_id, :owner_user_id, :total_kwh, :co2_avoided_kg,
-                            :timestamp, :period_start, :period_end, :methodology, :standard,
-                            :location, :signature, :status, :contract_version)""",
-                values={
-                    "credit_id": c.get("credit_id"),
-                    "device_id": c.get("device_id"),
-                    "owner_user_id": owner_user_id,
-                    "total_kwh": c.get("total_kwh", 0),
-                    "co2_avoided_kg": c.get("co2_avoided_kg", 0),
-                    "timestamp": c.get("timestamp"),
-                    "period_start": c.get("period_start"),
-                    "period_end": c.get("period_end"),
-                    "methodology": c.get("methodology", "CEA Grid Emission Factor 0.82 kg/kWh"),
-                    "standard": c.get("standard", "CTN-SOLAR-V1"),
-                    "location": c.get("location", "India"),
-                    "signature": c.get("signature"),
-                    "status": "verified",
-                    "contract_version": "old"
-                }
-            )
-        print(f"✓ Seeded {len(credits_list)} credits from IPFS")
+            cid = c.get("credit_id")
+            kwh = c.get("total_kwh", 0)
+            co2 = c.get("co2_avoided_kg", 0)
+            
+            if cid in existing_map:
+                row = existing_map[cid]
+                # Update only if the numeric values have drifted (do not overwrite status)
+                if abs(row["total_kwh"] - kwh) > 0.001 or abs(row["co2_avoided_kg"] - co2) > 0.001:
+                    await database.execute(
+                        query="UPDATE credits SET total_kwh = :kwh, co2_avoided_kg = :co2 WHERE credit_id = :cid",
+                        values={"kwh": kwh, "co2": co2, "cid": cid}
+                    )
+                    updates += 1
+            else:
+                await database.execute(
+                    query="""INSERT INTO credits 
+                        (credit_id, device_id, owner_user_id, total_kwh, co2_avoided_kg,
+                         timestamp, period_start, period_end, methodology, standard,
+                         location, signature, status, contract_version)
+                        VALUES (:credit_id, :device_id, :owner_user_id, :total_kwh, :co2_avoided_kg,
+                                :timestamp, :period_start, :period_end, :methodology, :standard,
+                                :location, :signature, :status, :contract_version)""",
+                    values={
+                        "credit_id": cid,
+                        "device_id": c.get("device_id"),
+                        "owner_user_id": owner_user_id,
+                        "total_kwh": kwh,
+                        "co2_avoided_kg": co2,
+                        "timestamp": c.get("timestamp"),
+                        "period_start": c.get("period_start"),
+                        "period_end": c.get("period_end"),
+                        "methodology": c.get("methodology", "CEA Grid Emission Factor 0.82 kg/kWh"),
+                        "standard": c.get("standard", "CTN-SOLAR-V1"),
+                        "location": c.get("location", "India"),
+                        "signature": c.get("signature"),
+                        "status": "verified",
+                        "contract_version": "new"
+                    }
+                )
+                inserts += 1
+                
+        print(f"✓ Synced {len(credits_list)} credits from IPFS ({inserts} new, {updates} updated)")
     except Exception as e:
         print(f"⚠ Failed to seed credits from IPFS: {e}")
 
