@@ -395,7 +395,7 @@
       list.innerHTML = data.credits.map(c => `
         <div class="credit-item">
           <div>
-            <div class="credit-id">#${c.credit_id} · ${(c.timestamp || c.period_end || '').slice(0, 10)}</div>
+            <div class="credit-id">#${c.credit_id} · ${(c.timestamp || c.period_end || '').slice(0, 16)}</div>
             <div class="credit-kwh">${(c.total_kwh || 0).toFixed(2)} kWh</div>
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
