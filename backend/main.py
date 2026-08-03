@@ -8,8 +8,9 @@ from web3 import Web3
 import os
 import hashlib
 import asyncio
+from ipfs_utils import upload_credit_to_ipfs
 
-from database import database, init_db, shutdown_db
+from database import database, init_db, shutdown_db, db_execute_with_retry
 from auth import require_admin, get_current_user
 from routes.auth_routes import router as auth_router
 from routes.installer_routes import router as installer_router
@@ -437,20 +438,7 @@ def debug():
     except Exception as e:
         return {"error": str(e)}
 
-# ── Upload individual credit to IPFS ──────────────────────────────────────
-
-def upload_credit_to_ipfs(credit: dict) -> str:
-    url = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
-    headers = {
-        "pinata_api_key": PINATA_API_KEY,
-        "pinata_secret_api_key": PINATA_SECRET
-    }
-    payload = {
-        "pinataContent": credit,
-        "pinataMetadata": {"name": f"credit_{credit['credit_id']}"}
-    }
-    r = http_requests.post(url, json=payload, headers=headers)
-    return r.json()["IpfsHash"]
+# ── (Moved to ipfs_utils.py) ────────────────────────────────────────────────
 
 # ── Mint a single credit on blockchain — NOW AUTH-GATED (admin only) ─────
 

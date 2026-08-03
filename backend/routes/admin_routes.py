@@ -4,11 +4,12 @@ All routes require admin role.
 """
 
 import time
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File
 from pydantic import BaseModel
 from typing import Optional
-
-from database import database, db_execute_with_retry
+import csv
+import io
+from database import database, db_execute_with_retry, process_raw_readings
 from auth import require_admin
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -26,6 +27,11 @@ class AdminRetireRequest(BaseModel):
 class AdminTransferRequest(BaseModel):
     new_holder: str
     reason: str
+
+class DeviceRegistration(BaseModel):
+    device_id: str
+    owner_email: str
+    location: str
 
 
 # ── Audit logging helper ──────────────────────────────────────────────────
@@ -348,3 +354,99 @@ async def system_health(admin: dict = Depends(require_admin)):
         health["db_error"] = str(e)
 
     return health
+
+@router.post("/devices")
+async def register_device(req: DeviceRegistration, admin: dict = Depends(require_admin)):
+    """Register a new device to an existing user."""
+    # Find user by email
+    user = await database.fetch_one("SELECT id FROM users WHERE email = :email", {"email": req.owner_email})
+    if not user:
+        raise HTTPException(404, f"User with email {req.owner_email} not found")
+        
+    try:
+        await database.execute(
+            "INSERT INTO devices (device_id, owner_user_id, location) VALUES (:device_id, :owner_id, :location)",
+            {"device_id": req.device_id, "owner_id": dict(user)["id"], "location": req.location}
+        )
+        await log_admin_action(admin["id"], "register_device", "devices", req.device_id, "CSV Ingestion Setup")
+        return {"status": "success", "message": f"Device {req.device_id} registered to {req.owner_email}"}
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            raise HTTPException(400, "Device ID already exists")
+        raise HTTPException(500, f"Database error: {str(e)}")
+
+@router.post("/ingest-csv")
+async def ingest_csv(file: UploadFile = File(...), admin: dict = Depends(require_admin)):
+    """
+    Ingest a CSV of raw readings.
+    Expected CSV columns: device_id, timestamp, delta_kwh
+    """
+    content = await file.read()
+    decoded = content.decode("utf-8")
+    
+    # Python CSV reader
+    csv_reader = csv.DictReader(io.StringIO(decoded))
+    
+    # 1. Validate headers
+    required_headers = {"device_id", "timestamp", "delta_kwh"}
+    if not required_headers.issubset(set(csv_reader.fieldnames or [])):
+        raise HTTPException(400, f"CSV is missing required columns. Expected: {required_headers}")
+        
+    # Pre-fetch all devices
+    devices = await database.fetch_all("SELECT device_id, owner_user_id, location FROM devices")
+    device_map = {d["device_id"]: dict(d) for d in devices}
+    
+    errors = []
+    parsed_readings = []
+    
+    # 2. Parse and validate rows
+    for i, row in enumerate(csv_reader):
+        device_id = row.get("device_id", "").strip()
+        timestamp = row.get("timestamp", "").strip()
+        delta_kwh_str = row.get("delta_kwh", "").strip()
+        
+        if not device_id or not timestamp or not delta_kwh_str:
+            errors.append(f"Row {i+1}: Missing required fields.")
+            continue
+            
+        if device_id not in device_map:
+            errors.append(f"Row {i+1}: Unknown device '{device_id}'. Register it first.")
+            continue
+            
+        try:
+            delta_kwh = float(delta_kwh_str)
+        except ValueError:
+            errors.append(f"Row {i+1}: 'delta_kwh' must be numeric. Found '{delta_kwh_str}'.")
+            continue
+            
+        # Hardcoded conversion rate for this MVP (CEA Grid Emission Factor 0.82)
+        co2_avoided_kg = delta_kwh * 0.82
+        
+        parsed_readings.append({
+            "device_id": device_id,
+            "timestamp": timestamp,
+            "total_kwh": delta_kwh, # For delta logic, total_kwh holds the delta
+            "co2_avoided_kg": co2_avoided_kg,
+            "location": device_map[device_id]["location"],
+            "owner_user_id": device_map[device_id]["owner_user_id"]
+        })
+        
+    if errors:
+        raise HTTPException(400, {"message": "CSV validation failed", "errors": errors})
+        
+    if not parsed_readings:
+        raise HTTPException(400, "CSV contains no data rows")
+        
+    # For now, process_raw_readings expects a single owner_user_id per batch for the accumulation step.
+    # We will pass the owner of the first reading, assuming the CSV is for a single owner/device.
+    # Revisit if multi-owner CSVs are needed.
+    owner_id = parsed_readings[0]["owner_user_id"]
+    
+    inserts, new_credits = await process_raw_readings(parsed_readings, owner_id)
+    
+    await log_admin_action(admin["id"], "ingest_csv", "generation_readings", file.filename, f"Ingested {inserts} readings")
+    
+    return {
+        "status": "success",
+        "message": f"Successfully ingested {inserts} readings, minted {new_credits} new 1-tonne credits."
+    }

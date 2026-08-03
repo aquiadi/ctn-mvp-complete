@@ -168,7 +168,7 @@ async def installer_readings(
 
     readings = await database.fetch_all(
         query="""SELECT reading_id, device_id, total_kwh, co2_avoided_kg,
-                 timestamp, period_start, period_end
+                 timestamp, signature
                  FROM generation_readings 
                  WHERE owner_user_id = :user_id
                  ORDER BY timestamp DESC

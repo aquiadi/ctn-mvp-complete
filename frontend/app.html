@@ -420,8 +420,11 @@
       list.innerHTML = data.readings.map(r => `
         <div class="credit-item">
           <div>
-            <div class="credit-id">Reading #${r.reading_id} · ${(r.timestamp || r.period_end || '').slice(0, 16)}</div>
-            <div class="credit-kwh">${(r.total_kwh || 0).toFixed(2)} kWh generated</div>
+            <div class="credit-id">Reading #${r.reading_id} · ${(r.timestamp || '').slice(0, 16)}</div>
+            <div class="credit-kwh">
+              ${(r.total_kwh || 0).toFixed(2)} kWh generated
+              ${r.signature ? `<span style="margin-left:8px;font-size:10px;color:var(--primary);background:rgba(0,255,170,0.1);padding:2px 6px;border-radius:4px;border:1px solid var(--primary);">✓ signed (${r.signature.slice(0,8)}...)</span>` : ''}
+            </div>
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
             <span class="credit-co2">+${(r.co2_avoided_kg || 0).toFixed(1)} kg CO₂</span>
