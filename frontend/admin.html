@@ -276,13 +276,13 @@
           return;
         }
         list.innerHTML = `
-          <div class="table-row cols-6 header"><div>ID</div><div>Owner</div><div>Generated On</div><div>kWh</div><div>Status</div><div>Action</div></div>
+          <div class="table-row cols-6 header"><div>ID</div><div>Owner</div><div>Accumulation Period</div><div>CO₂ (kg)</div><div>Status</div><div>Action</div></div>
           ${data.credits.map(c => `
             <div class="table-row cols-6">
-              <div>#${c.credit_id}</div>
-              <div style="font-size:10px;">${c.owner_email || '—'}</div>
-              <div>${c.timestamp || '—'}</div>
-              <div>${(c.total_kwh || 0).toFixed(1)}</div>
+              <div style="font-family:var(--mono);">#${c.credit_id}</div>
+              <div style="font-family:var(--mono);">${c.owner_email || '—'}</div>
+              <div style="font-family:var(--mono);">${(c.period_start || '').slice(0, 10)} to ${(c.period_end || '').slice(0, 10)}</div>
+              <div>${(c.co2_avoided_kg || 0).toFixed(0)} kg (1 Tonne)</div>
               <div><span class="badge badge-${c.status}">${c.status}</span></div>
               <div>
                 ${c.status === 'verified' ? `<button class="btn-sm" onclick="mintCredit(${c.credit_id}, '${c.owner_wallet || ''}')">Mint</button>` : '—'}

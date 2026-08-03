@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/marketplace", tags=["marketplace"])
 
 # ── Config ─────────────────────────────────────────────────────────────────
 
-CREDIT_VALUE_USD = 5
+CREDIT_VALUE_USD = 5.0
 INR_RATE = 83
 RESERVATION_TIMEOUT_SECONDS = 15 * 60  # 15 minutes
 
