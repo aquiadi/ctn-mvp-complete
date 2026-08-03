@@ -11,6 +11,8 @@ from databases import Database
 from passlib.context import CryptContext
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ctn_v2.db")
+if "sqlite" in DATABASE_URL and "ctn.db" in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("ctn.db", "ctn_v2.db")
 DB_PATH = DATABASE_URL.replace("sqlite:///", "")
 
 database = Database(DATABASE_URL)
