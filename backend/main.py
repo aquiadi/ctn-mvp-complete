@@ -79,12 +79,14 @@ def load_credits_from_ipfs():
     try:
         r = http_requests.get(IPFS_URL, timeout=30)
         data = r.json()
+        raw_list = []
         if isinstance(data, list):
-            return data
+            raw_list = data
         elif "credits" in data:
-            return data["credits"]
-        else:
-            return []
+            raw_list = data["credits"]
+        
+        from data_utils import parse_discrete_credits
+        return parse_discrete_credits(raw_list)
     except Exception as e:
         print(f"IPFS load error: {e}")
         return []
@@ -98,8 +100,9 @@ print(f"Loaded {len(CREDITS)} credits")
 def calculate_stats():
     if not CREDITS:
         return {}
-    total_kwh = CREDITS[-1].get("total_kwh", 0)
-    total_co2 = CREDITS[-1].get("co2_avoided_kg", 0)
+    
+    total_kwh = sum(c.get("total_kwh", 0) for c in CREDITS)
+    total_co2 = sum(c.get("co2_avoided_kg", 0) for c in CREDITS)
     total_credits = len(CREDITS)
     return {
         "total_kwh": round(total_kwh, 2),
