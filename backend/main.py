@@ -51,7 +51,7 @@ app.add_middleware(
     allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|.*\.vercel\.app|.*\.railway\.app|.*\.onrender\.com|.*\.netlify\.app)(:\d+)?",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Content-Type", "Accept"],
+    allow_headers=["*"],
 )
 
 # ── Mount route modules ───────────────────────────────────────────────────
