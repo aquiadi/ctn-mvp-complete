@@ -74,36 +74,27 @@ AMOY_RPC = os.getenv("AMOY_RPC", "https://polygon-amoy-bor-rpc.publicnode.com")
 EXPLORER = "https://amoy.polygonscan.com"
 
 # ── Load data from IPFS once at startup ────────────────────────────────────
-
-def load_credits_from_ipfs():
-    try:
-        r = http_requests.get(IPFS_URL, timeout=30)
-        data = r.json()
-        raw_list = []
-        if isinstance(data, list):
-            raw_list = data
-        elif "credits" in data:
-            raw_list = data["credits"]
-        
-        from data_utils import parse_discrete_credits
-        return parse_discrete_credits(raw_list)
-    except Exception as e:
-        print(f"IPFS load error: {e}")
-        return []
-
-print("Loading credits from IPFS...")
-CREDITS = load_credits_from_ipfs()
-print(f"Loaded {len(CREDITS)} credits")
+# (Removed in-memory IPFS loader; data is now synchronized via SQLite in database.py)
 
 # ── Helper ─────────────────────────────────────────────────────────────────
 
-def calculate_stats():
-    if not CREDITS:
-        return {}
+async def calculate_stats():
+    stats_query = """
+        SELECT 
+            COALESCE(SUM(total_kwh), 0) as total_kwh,
+            COALESCE(SUM(co2_avoided_kg), 0) as total_co2,
+            COUNT(*) as total_credits,
+            MIN(period_start) as period_start,
+            MAX(period_end) as period_end,
+            MIN(device_id) as device_id
+        FROM credits
+    """
+    row = await database.fetch_one(stats_query)
     
-    total_kwh = sum(c.get("total_kwh", 0) for c in CREDITS)
-    total_co2 = sum(c.get("co2_avoided_kg", 0) for c in CREDITS)
-    total_credits = len(CREDITS)
+    total_kwh = row["total_kwh"] if row else 0
+    total_co2 = row["total_co2"] if row else 0
+    total_credits = row["total_credits"] if row else 0
+    
     return {
         "total_kwh": round(total_kwh, 2),
         "total_co2_kg": round(total_co2, 2),
@@ -116,9 +107,9 @@ def calculate_stats():
         "yearly_credits": round(total_credits / TOTAL_DAYS * 365),
         "value_usd": round(total_credits * CREDIT_VALUE_USD, 2),
         "value_inr": round(total_credits * CREDIT_VALUE_USD * INR_RATE, 2),
-        "device_id": CREDITS[0].get("device_id", "unknown"),
-        "period_start": CREDITS[0].get("period_start", ""),
-        "period_end": CREDITS[-1].get("period_end", ""),
+        "device_id": row["device_id"] if row else "unknown",
+        "period_start": row["period_start"] if row else "",
+        "period_end": row["period_end"] if row else "",
         "methodology": "CEA Grid Emission Factor 0.82 kg CO2/kWh",
         "ipfs_master": IPFS_URL,
         "contract": CONTRACT_ADDRESS,
@@ -178,38 +169,46 @@ def marketplace_page():
     return FileResponse(os.path.join(FRONTEND_DIR, "marketplace.html"))
 
 @app.get("/api")
-def api_root():
+async def api_root():
+    count_row = await database.fetch_one("SELECT COUNT(*) as cnt FROM credits")
+    count = count_row["cnt"] if count_row else 0
     return {
         "name": "CTN API",
         "version": "2.0",
-        "credits_loaded": len(CREDITS),
+        "credits_loaded": count,
         "docs": "/docs"
     }
 
 @app.get("/stats")
-def get_stats():
+async def get_stats():
     """Full dashboard stats — kWh, CO2, credits, INR value"""
-    return calculate_stats()
+    return await calculate_stats()
 
 @app.get("/credits")
-def get_credits(page: int = 1, limit: int = 20):
+async def get_credits(page: int = 1, limit: int = 20):
     """Paginated credit list"""
-    start = (page - 1) * limit
-    end = start + limit
+    offset = (page - 1) * limit
+    credits = await database.fetch_all(
+        query="SELECT * FROM credits ORDER BY credit_id DESC LIMIT :limit OFFSET :offset",
+        values={"limit": limit, "offset": offset}
+    )
+    count_row = await database.fetch_one("SELECT COUNT(*) as cnt FROM credits")
+    total = count_row["cnt"] if count_row else 0
+    
     return {
-        "credits": CREDITS[start:end],
-        "total": len(CREDITS),
+        "credits": [dict(c) for c in credits],
+        "total": total,
         "page": page,
-        "pages": -(-len(CREDITS) // limit)
+        "pages": max(1, -(-total // limit))
     }
 
 @app.get("/credits/{credit_id}")
-def get_credit(credit_id: int):
+async def get_credit(credit_id: int):
     """Single credit by ID"""
-    credit = next((c for c in CREDITS if c.get("credit_id") == credit_id), None)
+    credit = await database.fetch_one("SELECT * FROM credits WHERE credit_id = :credit_id", {"credit_id": credit_id})
     if not credit:
         raise HTTPException(404, f"Credit #{credit_id} not found")
-    return credit
+    return dict(credit)
 
 @app.get("/value/{credits}")
 def credit_value(credits: int):
@@ -227,9 +226,9 @@ def credit_value(credits: int):
     }
 
 @app.get("/daily")
-def daily_breakdown():
+async def daily_breakdown():
     """Average daily generation stats"""
-    stats = calculate_stats()
+    stats = await calculate_stats()
     return {
         "kwh_per_day": stats["daily_avg_kwh"],
         "co2_per_day_kg": stats["daily_avg_co2_kg"],
@@ -254,9 +253,9 @@ def compare_co2(kg_co2: float):
     }
 
 @app.get("/agent/context")
-def agent_context():
+async def agent_context():
     """Pre-built context for Gemma agent"""
-    stats = calculate_stats()
+    stats = await calculate_stats()
     daily = {
         "kwh": stats["daily_avg_kwh"],
         "co2_kg": stats["daily_avg_co2_kg"],
@@ -470,9 +469,10 @@ async def mint_credit(
     """
 
     # 1. Find credit in loaded data
-    credit = next((c for c in CREDITS if c.get("credit_id") == credit_id), None)
+    credit = await database.fetch_one("SELECT * FROM credits WHERE credit_id = :credit_id", {"credit_id": credit_id})
     if not credit:
         raise HTTPException(404, f"Credit #{credit_id} not found")
+    credit = dict(credit)
 
     # 2. Upload this individual credit to IPFS
     individual_hash = upload_credit_to_ipfs(credit)
@@ -521,16 +521,17 @@ async def mint_credit(
 # ── Verify credit on blockchain (read-only — stays public) ───────────────
 
 @app.get("/verify/{credit_id}")
-def verify_on_chain(credit_id: int):
+async def verify_on_chain(credit_id: int):
     """
     Verify a credit by its IPFS credit ID.
     Uses IPFS source data for display values (consistent with /credits and /stats),
     and scans on-chain records to find the matching blockchain entry.
     """
     # 1. Look up credit in IPFS source data (same source as /credits and /stats)
-    credit = next((c for c in CREDITS if c.get("credit_id") == credit_id), None)
-    if not credit:
+    credit_row = await database.fetch_one("SELECT * FROM credits WHERE credit_id = :credit_id", {"credit_id": credit_id})
+    if not credit_row:
         raise HTTPException(404, f"Credit #{credit_id} not found")
+    credit = dict(credit_row)
 
     response = {
         "credit_id": credit_id,
