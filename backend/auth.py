@@ -22,7 +22,7 @@ SECRET_KEY = os.getenv("JWT_SECRET", "ctn-dev-secret-change-in-production-2024")
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_DAYS = 7
 COOKIE_NAME = "ctn_session"
-COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"  # True in production (HTTPS)
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"  # Must be True for SameSite=None
 COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN", None)  # e.g. ".ctn.org" in production
 
 
@@ -53,7 +53,7 @@ def set_auth_cookie(response: Response, token: str):
         value=token,
         httponly=True,
         secure=COOKIE_SECURE,
-        samesite="lax",
+        samesite="none",
         max_age=TOKEN_EXPIRE_DAYS * 24 * 3600,
         path="/",
         domain=COOKIE_DOMAIN,
