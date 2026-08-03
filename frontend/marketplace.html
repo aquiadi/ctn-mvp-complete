@@ -220,12 +220,8 @@
             </div>
             <div class="listing-stats">
               <div class="listing-stat">
-                <div class="listing-stat-value">${Math.round(listing.total_kwh).toLocaleString()}</div>
-                <div class="listing-stat-label">kWh generated</div>
-              </div>
-              <div class="listing-stat">
-                <div class="listing-stat-value">${Math.round(listing.total_co2_kg).toLocaleString()}</div>
-                <div class="listing-stat-label">kg CO₂ avoided</div>
+                <div class="listing-stat-value">${(listing.total_co2_kg / 1000).toFixed(0)}</div>
+                <div class="listing-stat-label">Tonnes CO₂ avoided</div>
               </div>
               <div class="listing-stat">
                 <div class="listing-stat-value">₹${(listing.credit_count * listing.price_per_credit_inr).toLocaleString('en-IN')}</div>

@@ -65,7 +65,7 @@ app.include_router(marketplace_router)
 
 IPFS_URL = "https://ivory-geographical-lungfish-400.mypinata.cloud/ipfs/bafybeifpn7y2r2rsjtvm4hun3dy63jkp5ah7qxfwhk5u6bemkapmis2qku"
 EMISSION_FACTOR = 0.82
-CREDIT_VALUE_USD = 5
+CREDIT_VALUE_USD = 5.0
 INR_RATE = 83
 TOTAL_DAYS = 34
 

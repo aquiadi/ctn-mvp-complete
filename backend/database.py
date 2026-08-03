@@ -10,7 +10,7 @@ import time
 from databases import Database
 from passlib.context import CryptContext
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ctn.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ctn_v2.db")
 DB_PATH = DATABASE_URL.replace("sqlite:///", "")
 
 database = Database(DATABASE_URL)
@@ -37,9 +37,9 @@ CREATE TABLE IF NOT EXISTS devices (
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 
-CREATE TABLE IF NOT EXISTS credits (
+CREATE TABLE IF NOT EXISTS generation_readings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    credit_id INTEGER UNIQUE NOT NULL,
+    reading_id INTEGER UNIQUE NOT NULL,
     device_id TEXT,
     owner_user_id INTEGER REFERENCES users(id),
     total_kwh REAL NOT NULL DEFAULT 0,
@@ -51,6 +51,23 @@ CREATE TABLE IF NOT EXISTS credits (
     standard TEXT DEFAULT 'CTN-SOLAR-V1',
     location TEXT DEFAULT 'India',
     signature TEXT,
+    credit_id INTEGER REFERENCES credits(id),
+    created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS credits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credit_id INTEGER UNIQUE NOT NULL,
+    device_id TEXT,
+    owner_user_id INTEGER REFERENCES users(id),
+    total_kwh REAL NOT NULL DEFAULT 0,
+    co2_avoided_kg REAL NOT NULL DEFAULT 1000,
+    period_start TEXT,
+    period_end TEXT,
+    methodology TEXT DEFAULT 'CEA Grid Emission Factor 0.82 kg/kWh',
+    standard TEXT DEFAULT 'CTN-SOLAR-V1',
+    location TEXT DEFAULT 'India',
+    contributing_readings TEXT, -- JSON array of reading_ids
     status TEXT NOT NULL DEFAULT 'verified'
         CHECK (status IN ('pending', 'verified', 'listed', 'reserved', 'sold', 'retired')),
     on_chain_id INTEGER,
@@ -228,8 +245,9 @@ async def init_db():
 
 
 async def sync_credits_from_ipfs(owner_user_id):
-    """Sync credits table from the IPFS-loaded data, acting as single source of truth."""
+    """Sync generation_readings from IPFS and accumulate into 1-tonne credits."""
     import requests as req
+    import json
 
     IPFS_URL = "https://ivory-geographical-lungfish-400.mypinata.cloud/ipfs/bafybeifpn7y2r2rsjtvm4hun3dy63jkp5ah7qxfwhk5u6bemkapmis2qku"
 
@@ -241,56 +259,89 @@ async def sync_credits_from_ipfs(owner_user_id):
         from data_utils import parse_discrete_credits
         credits_list = parse_discrete_credits(credits_list)
         
-        # Load existing credits into memory for fast diffing
-        existing_rows = await database.fetch_all("SELECT credit_id, total_kwh, co2_avoided_kg FROM credits")
-        existing_map = {row["credit_id"]: row for row in existing_rows}
+        # 1. Sync generation_readings
+        existing_rows = await database.fetch_all("SELECT reading_id FROM generation_readings")
+        existing_ids = {row["reading_id"] for row in existing_rows}
         
         inserts = 0
-        updates = 0
-
         for c in credits_list:
             cid = c.get("credit_id")
-            kwh = c.get("total_kwh", 0)
-            co2 = c.get("co2_avoided_kg", 0)
-            
-            if cid in existing_map:
-                row = existing_map[cid]
-                # Update only if the numeric values have drifted (do not overwrite status)
-                if abs(row["total_kwh"] - kwh) > 0.001 or abs(row["co2_avoided_kg"] - co2) > 0.001:
-                    await database.execute(
-                        query="UPDATE credits SET total_kwh = :kwh, co2_avoided_kg = :co2 WHERE credit_id = :cid",
-                        values={"kwh": kwh, "co2": co2, "cid": cid}
-                    )
-                    updates += 1
-            else:
+            if cid not in existing_ids:
                 await database.execute(
-                    query="""INSERT INTO credits 
-                        (credit_id, device_id, owner_user_id, total_kwh, co2_avoided_kg,
+                    query="""INSERT INTO generation_readings 
+                        (reading_id, device_id, owner_user_id, total_kwh, co2_avoided_kg,
                          timestamp, period_start, period_end, methodology, standard,
-                         location, signature, status, contract_version)
-                        VALUES (:credit_id, :device_id, :owner_user_id, :total_kwh, :co2_avoided_kg,
+                         location, signature)
+                        VALUES (:reading_id, :device_id, :owner_user_id, :total_kwh, :co2_avoided_kg,
                                 :timestamp, :period_start, :period_end, :methodology, :standard,
-                                :location, :signature, :status, :contract_version)""",
+                                :location, :signature)""",
                     values={
-                        "credit_id": cid,
+                        "reading_id": cid,
                         "device_id": c.get("device_id"),
                         "owner_user_id": owner_user_id,
-                        "total_kwh": kwh,
-                        "co2_avoided_kg": co2,
+                        "total_kwh": c.get("total_kwh", 0),
+                        "co2_avoided_kg": c.get("co2_avoided_kg", 0),
                         "timestamp": c.get("timestamp"),
                         "period_start": c.get("period_start"),
                         "period_end": c.get("period_end"),
                         "methodology": c.get("methodology", "CEA Grid Emission Factor 0.82 kg/kWh"),
                         "standard": c.get("standard", "CTN-SOLAR-V1"),
                         "location": c.get("location", "India"),
-                        "signature": c.get("signature"),
-                        "status": "verified",
-                        "contract_version": "new"
+                        "signature": c.get("signature")
                     }
                 )
                 inserts += 1
                 
-        print(f"✓ Synced {len(credits_list)} credits from IPFS ({inserts} new, {updates} updated)")
+        # 2. Accumulate into 1-tonne credits
+        readings = await database.fetch_all("SELECT reading_id, co2_avoided_kg, total_kwh, timestamp, device_id FROM generation_readings ORDER BY timestamp ASC")
+        
+        existing_credits_count = dict(await database.fetch_one("SELECT COUNT(*) as cnt FROM credits"))["cnt"]
+        
+        acc_co2 = 0.0
+        acc_kwh = 0.0
+        acc_readings = []
+        period_start = None
+        credits_minted_this_run = 0
+        new_credits = 0
+        
+        for r in readings:
+            if period_start is None:
+                period_start = r["timestamp"]
+                
+            acc_co2 += r["co2_avoided_kg"]
+            acc_kwh += r["total_kwh"]
+            acc_readings.append(r["reading_id"])
+            
+            while acc_co2 >= 1000.0:
+                if credits_minted_this_run >= existing_credits_count:
+                    # Mint a new 1-tonne credit
+                    new_credit_id = existing_credits_count + new_credits + 1
+                    await database.execute(
+                        query="""INSERT INTO credits 
+                            (credit_id, device_id, owner_user_id, total_kwh, co2_avoided_kg,
+                             period_start, period_end, status, contributing_readings)
+                            VALUES (:credit_id, :device_id, :owner_user_id, :kwh, 1000,
+                                    :p_start, :p_end, 'verified', :readings)""",
+                        values={
+                            "credit_id": new_credit_id,
+                            "device_id": r["device_id"],
+                            "owner_user_id": owner_user_id,
+                            "kwh": acc_kwh,
+                            "p_start": period_start,
+                            "p_end": r["timestamp"],
+                            "readings": json.dumps(acc_readings)
+                        }
+                    )
+                    new_credits += 1
+                
+                credits_minted_this_run += 1
+                acc_co2 -= 1000.0
+                acc_kwh = 0.0
+                acc_readings = []
+                period_start = r["timestamp"]
+                
+        print(f"✓ Synced IPFS: {inserts} new readings, accumulated {new_credits} new 1-tonne credits.")
+
     except Exception as e:
         print(f"⚠ Failed to seed credits from IPFS: {e}")
 

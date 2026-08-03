@@ -194,8 +194,10 @@
     const API = 'https://ctn-api-railway-production.up.railway.app';
     let dashboardData = null;
     let creditsData = null;
-    let currentPage = 1;
-    const PAGE_SIZE = 15;
+    let readingsData = null;
+    let currentCreditsPage = 1;
+    let currentReadingsPage = 1;
+    const PAGE_SIZE = 10;
 
     // ── Auth check ──
     async function checkAuth() {
@@ -232,13 +234,15 @@
       document.getElementById('nav-user').textContent = user.email;
 
       try {
-        const [dash, creds] = await Promise.all([
+        const [dash, creds, reads] = await Promise.all([
           fetch(API + '/api/installer/dashboard', { credentials: 'include' }).then(r => r.json()),
-          fetch(API + '/api/installer/credits?page=1&limit=' + PAGE_SIZE, { credentials: 'include' }).then(r => r.json())
+          fetch(API + '/api/installer/credits?page=1&limit=' + PAGE_SIZE, { credentials: 'include' }).then(r => r.json()),
+          fetch(API + '/api/installer/readings?page=1&limit=' + PAGE_SIZE, { credentials: 'include' }).then(r => r.json())
         ]);
         dashboardData = dash;
         creditsData = creds;
-        renderDashboard(dash, creds);
+        readingsData = reads;
+        renderDashboard(dash, creds, reads);
       } catch(e) {
         console.error('Dashboard error:', e);
         document.getElementById('main-content').innerHTML = `
@@ -349,17 +353,37 @@
           </div>
         </div>`;
 
-      // Credits list
+      // Info banner
+      html += `
+        <div class="notice notice-blue fade-up fade-up-3" style="margin-bottom: 2rem;">
+          <strong>Your generation data accumulates into credits</strong> — every 1,000 kg (1 metric ton) of CO₂ avoided generates 1 sellable carbon credit.
+        </div>`;
+
+      // Readings (Section A)
       html += `
         <div class="card fade-up fade-up-4">
           <div class="card-header">
-            <div class="card-title">Your credits</div>
-            <div class="page-info" id="page-info"></div>
+            <div class="card-title">Generation History</div>
+            <div class="page-info" id="readings-page-info"></div>
+          </div>
+          <div id="readings-list"></div>
+          <div class="pagination">
+            <button class="btn-page" onclick="changeReadingsPage(-1)" id="readings-prev-btn" disabled>← prev</button>
+            <button class="btn-page" onclick="changeReadingsPage(1)" id="readings-next-btn">next →</button>
+          </div>
+        </div>`;
+
+      // Credits list (Section B)
+      html += `
+        <div class="card fade-up fade-up-4">
+          <div class="card-header">
+            <div class="card-title">Sellable Credits (1 Tonne Units)</div>
+            <div class="page-info" id="credits-page-info"></div>
           </div>
           <div id="credits-list"></div>
           <div class="pagination">
-            <button class="btn-page" onclick="changePage(-1)" id="prev-btn" disabled>← prev</button>
-            <button class="btn-page" onclick="changePage(1)" id="next-btn">next →</button>
+            <button class="btn-page" onclick="changeCreditsPage(-1)" id="credits-prev-btn" disabled>← prev</button>
+            <button class="btn-page" onclick="changeCreditsPage(1)" id="credits-next-btn">next →</button>
           </div>
         </div>`;
 
@@ -381,46 +405,87 @@
       }
 
       document.getElementById('main-content').innerHTML = html;
+      renderReadings(readingsData);
       renderCredits(creds);
+    }
+
+    function renderReadings(data) {
+      const list = document.getElementById('readings-list');
+      if (!list) return;
+      if (!data.readings || data.readings.length === 0) {
+        list.innerHTML = '<div style="font-size:12px;color:var(--text3);padding:1rem 0;">No readings found.</div>';
+        return;
+      }
+
+      list.innerHTML = data.readings.map(r => `
+        <div class="credit-item">
+          <div>
+            <div class="credit-id">Reading #${r.reading_id} · ${(r.timestamp || r.period_end || '').slice(0, 16)}</div>
+            <div class="credit-kwh">${(r.total_kwh || 0).toFixed(2)} kWh generated</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="credit-co2">+${(r.co2_avoided_kg || 0).toFixed(1)} kg CO₂</span>
+          </div>
+        </div>
+      `).join('');
+
+      const pages = data.pages || 1;
+      const info = document.getElementById('readings-page-info');
+      if (info) info.textContent = `page ${currentReadingsPage} of ${pages}`;
+      const prev = document.getElementById('readings-prev-btn');
+      const next = document.getElementById('readings-next-btn');
+      if (prev) prev.disabled = currentReadingsPage <= 1;
+      if (next) next.disabled = currentReadingsPage >= pages;
     }
 
     function renderCredits(data) {
       const list = document.getElementById('credits-list');
       if (!list) return;
       if (!data.credits || data.credits.length === 0) {
-        list.innerHTML = '<div style="font-size:12px;color:var(--text3);padding:1rem 0;">No credits found.</div>';
+        list.innerHTML = '<div style="font-size:12px;color:var(--text3);padding:1rem 0;">No credits accumulated yet.</div>';
         return;
       }
 
       list.innerHTML = data.credits.map(c => `
         <div class="credit-item">
           <div>
-            <div class="credit-id">#${c.credit_id} · ${(c.timestamp || c.period_end || '').slice(0, 16)}</div>
-            <div class="credit-kwh">${(c.total_kwh || 0).toFixed(2)} kWh</div>
+            <div class="credit-id">Credit #${c.credit_id} · ${(c.period_start || '').slice(0,10)} to ${(c.period_end || '').slice(0,10)}</div>
+            <div class="credit-kwh">${(c.co2_avoided_kg || 0).toFixed(0)} kg CO₂ Avoided (1 Tonne)</div>
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
-            <span class="credit-co2">${(c.co2_avoided_kg || 0).toFixed(1)} kg CO₂</span>
             <span class="badge badge-${c.status}">${c.status}</span>
           </div>
         </div>
       `).join('');
 
       const pages = data.pages || 1;
-      const info = document.getElementById('page-info');
-      if (info) info.textContent = `page ${currentPage} of ${pages}`;
-      const prev = document.getElementById('prev-btn');
-      const next = document.getElementById('next-btn');
-      if (prev) prev.disabled = currentPage <= 1;
-      if (next) next.disabled = currentPage >= pages;
+      const info = document.getElementById('credits-page-info');
+      if (info) info.textContent = `page ${currentCreditsPage} of ${pages}`;
+      const prev = document.getElementById('credits-prev-btn');
+      const next = document.getElementById('credits-next-btn');
+      if (prev) prev.disabled = currentCreditsPage <= 1;
+      if (next) next.disabled = currentCreditsPage >= pages;
     }
 
-    async function changePage(dir) {
-      const pages = creditsData ? creditsData.pages : 1;
-      const newPage = currentPage + dir;
+    async function changeReadingsPage(dir) {
+      const pages = readingsData ? readingsData.pages : 1;
+      const newPage = currentReadingsPage + dir;
       if (newPage < 1 || newPage > pages) return;
-      currentPage = newPage;
+      currentReadingsPage = newPage;
       try {
-        const r = await fetch(API + `/api/installer/credits?page=${currentPage}&limit=${PAGE_SIZE}`, { credentials: 'include' });
+        const r = await fetch(API + `/api/installer/readings?page=${currentReadingsPage}&limit=${PAGE_SIZE}`, { credentials: 'include' });
+        readingsData = await r.json();
+        renderReadings(readingsData);
+      } catch(e) { console.error(e); }
+    }
+
+    async function changeCreditsPage(dir) {
+      const pages = creditsData ? creditsData.pages : 1;
+      const newPage = currentCreditsPage + dir;
+      if (newPage < 1 || newPage > pages) return;
+      currentCreditsPage = newPage;
+      try {
+        const r = await fetch(API + `/api/installer/credits?page=${currentCreditsPage}&limit=${PAGE_SIZE}`, { credentials: 'include' });
         creditsData = await r.json();
         renderCredits(creditsData);
       } catch(e) { console.error(e); }
@@ -441,7 +506,7 @@
         <div style="background:var(--bg2);border-radius:var(--radius-sm);padding:1rem;font-size:12px;">
           <div style="display:flex;justify-content:space-between;margin-bottom:4px;align-items:center;">
             <span>Credits to list</span>
-            <input type="number" id="sell-quantity" min="10" max="${verified}" value="${verified}" style="width: 80px; text-align: right; padding: 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text);" oninput="updateSellValue(this.value, ${verified})">
+            <input type="number" id="sell-quantity" min="1" max="${verified}" value="${verified}" style="width: 80px; text-align: right; padding: 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text);" oninput="updateSellValue(this.value, ${verified})">
           </div>
           <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
             <span>Price per credit</span><span>₹415</span>

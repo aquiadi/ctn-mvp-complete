@@ -15,9 +15,9 @@ router = APIRouter(prefix="/api/installer", tags=["installer"])
 
 # ── Config ─────────────────────────────────────────────────────────────────
 
-CREDIT_VALUE_USD = 5
+CREDIT_VALUE_USD = 5.0
 INR_RATE = 83
-SELL_THRESHOLD = 10  # Minimum verified credits to list for sale
+SELL_THRESHOLD = 1  # MVP threshold — 1 tonne. Revisit for production (e.g. 10+ tonnes).
 
 
 # ── Request models ─────────────────────────────────────────────────────────
@@ -118,7 +118,7 @@ async def installer_credits(
     if status_filter:
         credits = await database.fetch_all(
             query="""SELECT id, credit_id, device_id, total_kwh, co2_avoided_kg,
-                     timestamp, period_start, period_end, status, on_chain_id,
+                     period_start, period_end, status, on_chain_id,
                      ipfs_hash, tx_hash, listed_at, sold_at
                      FROM credits 
                      WHERE owner_user_id = :user_id AND status = :status
@@ -133,7 +133,7 @@ async def installer_credits(
     else:
         credits = await database.fetch_all(
             query="""SELECT id, credit_id, device_id, total_kwh, co2_avoided_kg,
-                     timestamp, period_start, period_end, status, on_chain_id,
+                     period_start, period_end, status, on_chain_id,
                      ipfs_hash, tx_hash, listed_at, sold_at
                      FROM credits 
                      WHERE owner_user_id = :user_id
@@ -155,6 +155,39 @@ async def installer_credits(
         "pages": max(1, -(-total_count // limit)),
     }
 
+
+@router.get("/readings")
+async def installer_readings(
+    page: int = 1,
+    limit: int = 20,
+    user: dict = Depends(require_installer)
+):
+    """Paginated list of raw generation readings (15-min intervals)."""
+    user_id = user["id"]
+    offset = (page - 1) * limit
+
+    readings = await database.fetch_all(
+        query="""SELECT reading_id, device_id, total_kwh, co2_avoided_kg,
+                 timestamp, period_start, period_end
+                 FROM generation_readings 
+                 WHERE owner_user_id = :user_id
+                 ORDER BY timestamp DESC
+                 LIMIT :limit OFFSET :offset""",
+        values={"user_id": user_id, "limit": limit, "offset": offset}
+    )
+    total = await database.fetch_one(
+        query="SELECT COUNT(*) as cnt FROM generation_readings WHERE owner_user_id = :user_id",
+        values={"user_id": user_id}
+    )
+
+    total_count = dict(total)["cnt"]
+
+    return {
+        "readings": [dict(r) for r in readings],
+        "total": total_count,
+        "page": page,
+        "pages": max(1, -(-total_count // limit)),
+    }
 
 @router.get("/devices")
 async def installer_devices(user: dict = Depends(require_installer)):
