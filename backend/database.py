@@ -242,21 +242,10 @@ async def seed_credits_from_ipfs(owner_user_id):
         data = r.json()
         credits_list = data if isinstance(data, list) else data.get("credits", [])
 
-        # The IPFS data contains cumulative totals. We need the delta for each individual credit.
-        credits_list.sort(key=lambda x: x.get("credit_id", 0))
-        prev_kwh = 0
-        prev_co2 = 0
+        from data_utils import parse_discrete_credits
+        credits_list = parse_discrete_credits(credits_list)
 
         for c in credits_list:
-            cum_kwh = c.get("total_kwh", 0)
-            cum_co2 = c.get("co2_avoided_kg", 0)
-            
-            delta_kwh = max(0, cum_kwh - prev_kwh)
-            delta_co2 = max(0, cum_co2 - prev_co2)
-            
-            prev_kwh = cum_kwh
-            prev_co2 = cum_co2
-
             await database.execute(
                 query="""INSERT INTO credits 
                     (credit_id, device_id, owner_user_id, total_kwh, co2_avoided_kg,
@@ -269,8 +258,8 @@ async def seed_credits_from_ipfs(owner_user_id):
                     "credit_id": c.get("credit_id"),
                     "device_id": c.get("device_id"),
                     "owner_user_id": owner_user_id,
-                    "total_kwh": delta_kwh,
-                    "co2_avoided_kg": delta_co2,
+                    "total_kwh": c.get("total_kwh", 0),
+                    "co2_avoided_kg": c.get("co2_avoided_kg", 0),
                     "timestamp": c.get("timestamp"),
                     "period_start": c.get("period_start"),
                     "period_end": c.get("period_end"),
