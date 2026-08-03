@@ -118,14 +118,27 @@
 
     <!-- CREDITS -->
     <div class="section" id="sec-credits">
-      <div class="page-header"><p class="page-label">Registry</p><h1>All credits</h1></div>
-      <div class="card">
-        <div class="card-title">Credit registry</div>
-        <div id="credits-list"><div class="empty-note">Loading...</div></div>
+      <div class="page-header fade-up">
+        <p class="page-label">System Credits</p>
+        <h1>All platform credits</h1>
+      </div>
+      <div class="card fade-up fade-up-2">
+        <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+          <div class="card-title" style="margin-bottom:0;">Manual Mint</div>
+          <div style="display:flex; gap:8px;">
+            <input type="number" id="manual-mint-id" placeholder="Credit ID" style="padding:4px 8px; border:1px solid var(--border); border-radius:var(--radius-sm); font-family:var(--mono); font-size:11px; width:120px;">
+            <button class="btn-sm" onclick="mintManualCredit()">Mint ID on-chain</button>
+          </div>
+        </div>
+        <div style="border-top:1px solid var(--border); margin:1rem 0 -0.25rem 0;"></div>
+        <div class="card-header" style="margin-top:1rem;">
+          <div class="card-title">Credit ledger</div>
+          <div class="page-info" id="credits-page-info"></div>
+        </div>
+        <div id="credits-list"></div>
         <div class="pagination">
-          <button class="btn-page" onclick="loadCredits(creditsPage-1)" id="credits-prev" disabled>← prev</button>
-          <span class="page-info" id="credits-page-info"></span>
-          <button class="btn-page" onclick="loadCredits(creditsPage+1)" id="credits-next">next →</button>
+          <button class="btn-page" onclick="loadCredits(creditsPage - 1)" id="credits-prev" disabled>← prev</button>
+          <button class="btn-page" onclick="loadCredits(creditsPage + 1)" id="credits-next">next →</button>
         </div>
       </div>
     </div>
@@ -272,7 +285,7 @@
               <div>${(c.total_kwh || 0).toFixed(1)}</div>
               <div><span class="badge badge-${c.status}">${c.status}</span></div>
               <div>
-                ${c.status === 'verified' ? `<button class="btn-sm" onclick="mintCredit(${c.credit_id})">Mint</button>` : '—'}
+                ${c.status === 'verified' ? `<button class="btn-sm" onclick="mintCredit(${c.credit_id}, '${c.owner_wallet || ''}')">Mint</button>` : '—'}
               </div>
             </div>
           `).join('')}
@@ -283,25 +296,42 @@
       } catch(e) { console.error(e); }
     }
 
-    async function mintCredit(creditId) {
-      if (!confirm(`Are you sure you want to mint credit #${creditId}?`)) return;
+    async function mintManualCredit() {
+      const id = document.getElementById('manual-mint-id').value;
+      if (!id) {
+        alert('Please enter a Credit ID to mint.');
+        return;
+      }
+      await mintCredit(id, '');
+    }
+
+    async function mintCredit(creditId, defaultWallet = '') {
+      const recipient = prompt(`Enter recipient wallet address for Credit #${creditId}:`, defaultWallet);
+      if (recipient === null) return; // User cancelled
+      if (!recipient.trim()) {
+        alert("A recipient wallet address is required to mint.");
+        return;
+      }
+
+      if (!confirm(`Are you sure you want to mint credit #${creditId} to ${recipient}? This will execute an on-chain transaction.`)) return;
+
       try {
-        const res = await fetch(API + `/api/admin/mint/${creditId}`, {
+        // Change from /api/admin/mint (which only logged) to /mint which actually hits the blockchain
+        const res = await fetch(API + `/mint/${creditId}?recipient=${encodeURIComponent(recipient.trim())}`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ reason: "Manual mint from Admin panel" })
+          credentials: 'include'
         });
+        
         if (!res.ok) {
           const err = await res.json();
-          alert('Minting failed: ' + (err.detail || 'Unknown error'));
+          alert('Minting failed: ' + (err.detail || JSON.stringify(err)));
           return;
         }
-        alert(`Successfully minted credit #${creditId}`);
+        alert(`Successfully minted credit #${creditId} to the blockchain!`);
         loadCredits(creditsPage);
         loadOverview();
       } catch(e) {
-        alert('Error minting credit');
+        alert('Error minting credit. Please ensure your backend is running and blockchain is accessible.');
         console.error(e);
       }
     }

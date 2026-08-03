@@ -125,7 +125,7 @@ async def list_all_credits(
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
     credits = await database.fetch_all(
-        query=f"""SELECT c.*, u.email as owner_email
+        query=f"""SELECT c.*, u.email as owner_email, u.wallet_address as owner_wallet
                   FROM credits c
                   LEFT JOIN users u ON c.owner_user_id = u.id
                   {where}
