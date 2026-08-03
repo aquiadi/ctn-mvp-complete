@@ -519,26 +519,58 @@ async def mint_credit(
 
 @app.get("/verify/{credit_id}")
 def verify_on_chain(credit_id: int):
-    """Check if a credit exists and is valid on blockchain"""
+    """
+    Verify a credit by its IPFS credit ID.
+    Uses IPFS source data for display values (consistent with /credits and /stats),
+    and scans on-chain records to find the matching blockchain entry.
+    """
+    # 1. Look up credit in IPFS source data (same source as /credits and /stats)
+    credit = next((c for c in CREDITS if c.get("credit_id") == credit_id), None)
+    if not credit:
+        raise HTTPException(404, f"Credit #{credit_id} not found")
+
+    response = {
+        "credit_id": credit_id,
+        "on_chain": False,
+        "energy_kwh": round(credit.get("total_kwh", 0), 3),
+        "co2_avoided_kg": round(credit.get("co2_avoided_kg", 0), 3),
+        "methodology": credit.get("methodology", ""),
+        "device_id": credit.get("device_id", ""),
+        "period": f"{credit.get('period_start', '')[:10]} → {credit.get('period_end', '')[:10]}",
+        "ipfs_master": IPFS_URL,
+        "signature": credit.get("signature", ""),
+    }
+
+    # 2. Try to find matching on-chain record
+    #    On-chain IDs are auto-incremented by the contract and may not match IPFS credit IDs
+    #    (e.g. due to test mints creating duplicate entries). We match by comparing the
+    #    energy/co2 values that were stored at mint time (original value × 1000 for uint256).
     try:
-        result = contract.functions.getCredit(credit_id).call()
-        # Empty credit = never minted
-        if result[0] == "" and result[5] == "0x0000000000000000000000000000000000000000":
-            return {"credit_id": credit_id, "on_chain": False, "error": "Credit does not exist on chain"}
-        return {
-            "credit_id": credit_id,
-            "on_chain": True,
-            "ipfs_hash": result[0],
-            "energy_kwh": result[1],
-            "co2_avoided_kg": result[2],
-            "timestamp": result[3],
-            "retired": result[4],
-            "holder": result[5],
-            "verify_ipfs": f"https://gateway.pinata.cloud/ipfs/{result[0]}",
-            "polygonscan": f"{EXPLORER}/address/{CONTRACT_ADDRESS}"
-        }
+        total_on_chain = contract.functions.totalCredits().call()
+        expected_kwh = int(credit.get("total_kwh", 0) * 1000)
+        expected_co2 = int(credit.get("co2_avoided_kg", 0) * 1000)
+
+        for oc_id in range(1, total_on_chain + 1):
+            result = contract.functions.getCredit(oc_id).call()
+            # Skip empty/unminted slots
+            if result[0] == "" and result[5] == "0x0000000000000000000000000000000000000000":
+                continue
+            if result[1] == expected_kwh and result[2] == expected_co2:
+                response.update({
+                    "on_chain": True,
+                    "on_chain_id": oc_id,
+                    "ipfs_hash": result[0],
+                    "timestamp": result[3],
+                    "retired": result[4],
+                    "holder": result[5],
+                    "verify_ipfs": f"https://gateway.pinata.cloud/ipfs/{result[0]}",
+                    "polygonscan": f"{EXPLORER}/address/{CONTRACT_ADDRESS}"
+                })
+                break
     except Exception as e:
-        return {"credit_id": credit_id, "on_chain": False, "error": str(e)}
+        response["chain_error"] = str(e)
+
+    return response
 
 # ── Retire credit on blockchain — NOW AUTH-GATED (admin only) ─────────────
 
