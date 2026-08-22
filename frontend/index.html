@@ -1068,20 +1068,47 @@
 
     // ── Init ──
 
-    async function init() {
-      try {
-        const [stats, credits] = await Promise.all([
-          CTN.get('/stats'),
-          CTN.get(`/credits?page=1&limit=${CREDITS_PAGE_SIZE}`),
-        ]);
+    // A deploy restarts the API for under a minute, and the page used to fetch
+    // once and give up — leaving an open tab reading "offline" long after the
+    // service came back. Retry with backoff, then keep a slow poll going so the
+    // page heals itself rather than waiting for someone to refresh.
+    const RETRY_DELAYS_MS = [2000, 5000, 10000, 20000];
+    const RECHECK_INTERVAL_MS = 60000;
+    let recoveryTimer = null;
 
-        populateStats(stats);
-        populateProof(stats);
-        populateCredits(credits);
-        setBadge('live', 'var(--green-light)', 'var(--green)');
+    async function loadLiveData() {
+      const [stats, credits] = await Promise.all([
+        CTN.get('/stats'),
+        CTN.get(`/credits?page=1&limit=${CREDITS_PAGE_SIZE}`),
+      ]);
+
+      populateStats(stats);
+      populateProof(stats);
+      populateCredits(credits);
+      setBadge('live', 'var(--green-light)', 'var(--green)');
+    }
+
+    async function init(attempt = 0) {
+      try {
+        await loadLiveData();
+
+        // Recovered after an outage: stop the fast retries, keep a slow watch.
+        if (recoveryTimer) { clearInterval(recoveryTimer); recoveryTimer = null; }
       } catch (e) {
-        console.error('API unavailable:', e);
-        showUnavailable(e);
+        console.error(`API unavailable (attempt ${attempt + 1}):`, e);
+        showUnavailable(e, attempt < RETRY_DELAYS_MS.length);
+
+        if (attempt < RETRY_DELAYS_MS.length) {
+          setTimeout(() => init(attempt + 1), RETRY_DELAYS_MS[attempt]);
+        } else if (!recoveryTimer) {
+          // Give up on the burst, but keep checking quietly so a tab left open
+          // through a longer outage comes back on its own.
+          recoveryTimer = setInterval(() => {
+            loadLiveData()
+              .then(() => { clearInterval(recoveryTimer); recoveryTimer = null; })
+              .catch(() => {});
+          }, RECHECK_INTERVAL_MS);
+        }
       }
     }
 
@@ -1090,8 +1117,9 @@
      * on-chain records, so an unreachable API is reported as such. Showing
      * placeholder numbers here would misrepresent unverified data as measured.
      */
-    function showUnavailable(error) {
-      setBadge('offline', 'var(--amber-light)', 'var(--amber)');
+    function showUnavailable(error, retrying) {
+      setBadge(retrying ? 'reconnecting' : 'offline',
+               'var(--amber-light)', 'var(--amber)');
 
       ['stat-kwh', 'stat-co2', 'stat-credits', 'stat-inr',
        'hero-credits-count', 'hero-days'].forEach(id => {
@@ -1107,7 +1135,8 @@
       document.getElementById('credits-list').innerHTML = `
         <div style="padding:1.5rem 1.15rem;text-align:center;font-size:11px;color:var(--text3);">
           Live data is temporarily unavailable.<br>
-          <span style="opacity:0.7;">${esc(error.message || '')}</span>
+          <span style="opacity:0.7;">${esc(error.message || '')}</span><br>
+          <span style="opacity:0.7;">${retrying ? 'Reconnecting…' : 'Retrying in the background.'}</span>
         </div>`;
       document.getElementById('credits-total').textContent = '—';
       document.getElementById('credits-page-info').textContent = '';
