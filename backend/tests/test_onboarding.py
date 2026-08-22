@@ -532,3 +532,75 @@ async def test_preview_writes_nothing(app_client, make_user):
     row = await database.database.fetch_one(
         "SELECT COUNT(*) AS c FROM generation_readings WHERE device_id = 'DRY-01'")
     assert row["c"] == 0
+
+
+# ── Device status must reflect reality ─────────────────────────────────────
+
+async def test_the_dashboard_reports_whether_a_device_is_verified(
+    app_client, admin_token, make_user
+):
+    """
+    Regression test.
+
+    The dashboard showed every device with a green "Reporting" badge whether or
+    not an operator had approved it, implying an endorsement that had not
+    happened. Receiving data and being confirmed are different things, and it is
+    the second that decides whether credits can be sold.
+    """
+    token, _ = await make_user("installer")
+    _, sensor, _ = await _pair(app_client, token, "STATUS-01")
+    await app_client.post("/api/v1/readings", json={"readings": [sensor.reading(0.5)]})
+
+    before = (await app_client.get(
+        "/api/installer/dashboard", headers=auth(token))).json()
+    device = next(d for d in before["devices"] if d["device_id"] == "STATUS-01")
+    assert device["verified"] is False
+    assert device["receiving_data"] is True      # data is arriving
+    assert device["attests"] is True
+
+    await app_client.post(
+        "/api/admin/devices/STATUS-01/verify",
+        headers=auth(admin_token), json={"note": "Installation confirmed on site"})
+
+    after = (await app_client.get(
+        "/api/installer/dashboard", headers=auth(token))).json()
+    device = next(d for d in after["devices"] if d["device_id"] == "STATUS-01")
+    assert device["verified"] is True
+
+
+async def test_an_upload_only_meter_is_not_described_as_a_sensor(
+    app_client, make_user
+):
+    token, _ = await make_user("installer")
+    await app_client.post("/api/installer/devices", headers=auth(token),
+                          json={"device_id": "MANUAL-01", "location": "X"})
+
+    body = (await app_client.get(
+        "/api/installer/dashboard", headers=auth(token))).json()
+    device = next(d for d in body["devices"] if d["device_id"] == "MANUAL-01")
+    assert device["attests"] is False
+    assert device["source"] == "uploads"
+    assert device["receiving_data"] is False
+
+
+async def test_pending_credits_come_with_an_explanation(app_client, make_user):
+    """A blocked balance with no stated reason reads as something going wrong."""
+    token, _ = await make_user("installer")
+    _, sensor, _ = await _pair(app_client, token, "STATUS-PENDING")
+
+    per_reading = config.KG_CO2_PER_CREDIT / config.EMISSION_FACTOR_KG_PER_KWH / 2 + 1
+    await app_client.post("/api/v1/readings", json={
+        "readings": [sensor.reading(round(per_reading, 6)) for _ in range(2)]})
+
+    body = (await app_client.get(
+        "/api/installer/dashboard", headers=auth(token))).json()
+    assert body["credits_by_status"]["pending"] == 1
+    assert body["pending_reason"]
+    assert "released" in body["pending_reason"]
+
+
+async def test_no_explanation_is_shown_when_nothing_is_pending(app_client, make_user):
+    token, _ = await make_user("installer")
+    body = (await app_client.get(
+        "/api/installer/dashboard", headers=auth(token))).json()
+    assert body["pending_reason"] is None

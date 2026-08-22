@@ -123,10 +123,33 @@ async def installer_dashboard(user: dict = Depends(require_installer)):
     by_status = {row["status"]: row["count"] for row in status_rows}
     verified = by_status.get("verified", 0)
 
-    devices = await database.fetch_all(
-        query="SELECT device_id, location FROM devices WHERE owner_user_id = :user_id",
+    device_rows = await database.fetch_all(
+        query="""SELECT d.device_id, d.location, d.verified, d.enrolled_via,
+                        d.public_key, d.last_sequence,
+                        (SELECT COUNT(*) FROM generation_readings r
+                         WHERE r.device_id = d.device_id) AS reading_count
+                 FROM devices d WHERE d.owner_user_id = :user_id
+                 ORDER BY d.created_at DESC""",
         values={"user_id": user_id},
     )
+
+    devices = []
+    for row in device_rows:
+        row = dict(row)
+        devices.append(
+            {
+                "device_id": row["device_id"],
+                "location": row["location"],
+                # Whether an operator has confirmed the installation. This is
+                # what decides if its credits can be sold, so it is reported
+                # rather than left for the dashboard to assume.
+                "verified": bool(row["verified"]),
+                "attests": bool(row["public_key"]),
+                "reading_count": row["reading_count"],
+                "receiving_data": row["reading_count"] > 0,
+                "source": "sensor" if row["public_key"] else "uploads",
+            }
+        )
 
     total_credits = totals["total_credits"]
 
@@ -159,6 +182,11 @@ async def installer_dashboard(user: dict = Depends(require_installer)):
             "price_per_credit_usd": config.CREDIT_VALUE_USD,
             "price_per_credit_inr": config.CREDIT_VALUE_INR,
         },
+        "pending_reason": (
+            "Credits stay pending until an operator confirms the installation "
+            "behind them. Nothing is lost — they are released once that happens."
+            if by_status.get("pending") else None
+        ),
         "devices": [dict(d) for d in devices],
     }
 
