@@ -1,29 +1,74 @@
-import os
+"""
+IPFS certificate storage via Pinata.
+"""
+
+import json
+
 import requests
 
-PINATA_API_KEY = os.getenv("PINATA_API_KEY")
-PINATA_SECRET = os.getenv("PINATA_SECRET")
+import config
+
+
+class IPFSUploadError(RuntimeError):
+    """Raised when a certificate could not be pinned."""
+
 
 def upload_credit_to_ipfs(credit: dict) -> str:
     """
-    Upload a credit certificate to IPFS via Pinata.
-    Returns the IPFS hash (CID).
+    Pin a credit certificate to IPFS and return its CID.
+
+    Without Pinata credentials — the normal case in local development — the
+    content is hashed locally instead. The result is deterministic and clearly
+    marked, so it can never be mistaken for a real CID.
     """
-    url = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
-    headers = {
-        "pinata_api_key": PINATA_API_KEY,
-        "pinata_secret_api_key": PINATA_SECRET
-    }
-    payload = {
-        "pinataContent": credit,
-        "pinataMetadata": {"name": f"credit_{credit.get('credit_id', 'new')}"}
-    }
-    
-    # If no credentials are provided, return a simulated hash for local dev
-    if not PINATA_API_KEY or not PINATA_SECRET:
-        print("⚠ No Pinata credentials found, simulating IPFS upload")
-        return f"simulated_hash_{credit.get('credit_id', 'new')}"
-        
-    r = requests.post(url, json=payload, headers=headers)
-    r.raise_for_status()
-    return r.json()["IpfsHash"]
+    label = credit.get("credit_id", "new")
+
+    if not config.PINATA_API_KEY or not config.PINATA_SECRET:
+        digest = _local_digest(credit)
+        print(f"⚠ No Pinata credentials — certificate for credit {label} not pinned")
+        return f"local-{digest}"
+
+    try:
+        response = requests.post(
+            config.PINATA_PIN_URL,
+            json={
+                "pinataContent": credit,
+                "pinataMetadata": {"name": f"credit_{label}"},
+            },
+            headers={
+                "pinata_api_key": config.PINATA_API_KEY,
+                "pinata_secret_api_key": config.PINATA_SECRET,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()["IpfsHash"]
+    except Exception as exc:
+        raise IPFSUploadError(f"Failed to pin certificate for credit {label}: {exc}") from exc
+
+
+def is_real_cid(ipfs_hash: str) -> bool:
+    """
+    Whether a stored hash is an actual IPFS CID.
+
+    Certificates issued without Pinata credentials carry a locally computed
+    placeholder instead. Older records used a different placeholder prefix, so
+    the check is on CID shape rather than on any one marker.
+    """
+    if not ipfs_hash:
+        return False
+    return (
+        (ipfs_hash.startswith("Qm") and len(ipfs_hash) == 46)
+        or (ipfs_hash.startswith("baf") and len(ipfs_hash) >= 50)
+    )
+
+
+def gateway_url(ipfs_hash: str) -> str | None:
+    """Public URL for a pinned certificate, or None if it was never pinned."""
+    return f"{config.IPFS_GATEWAY}/{ipfs_hash}" if is_real_cid(ipfs_hash) else None
+
+
+def _local_digest(credit: dict) -> str:
+    import hashlib
+
+    return hashlib.sha256(json.dumps(credit, sort_keys=True).encode("utf-8")).hexdigest()[:32]

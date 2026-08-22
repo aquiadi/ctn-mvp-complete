@@ -122,102 +122,87 @@
 
   <footer>CTN · Climate Trust Network · Simulated data from Patna, Bihar, India</footer>
 
+  <script src="/static/ctn.js"></script>
   <script>
-    const API = 'https://ctn-api-railway-production.up.railway.app';
-    let currentPage = 1;
-    let currentFilter = null;
-    let totalPages = 1;
     const PAGE_SIZE = 20;
+    const esc = CTN.fmt.escape;
 
-    // ── Auth-aware fetch wrapper ──
-    function authFetch(url, options = {}) {
-      const token = localStorage.getItem('ctn_token');
-      if (token) {
-        options.headers = options.headers || {};
-        if (typeof options.headers.set === 'function') {
-          options.headers.set('Authorization', 'Bearer ' + token);
-        } else {
-          options.headers['Authorization'] = 'Bearer ' + token;
-        }
-      }
-      options.credentials = 'include';
-      return fetch(url, options);
-    }
+    const state = { page: 1, pages: 1, statusFilter: null };
 
-    async function checkAuth() {
-      try {
-        const r = await authFetch(API + '/api/auth/me');
-        if (!r.ok) throw new Error();
-        const d = await r.json();
-        if (d.user.role !== 'installer') { window.location.href = '/login'; return null; }
-        return d.user;
-      } catch(e) { window.location.href = '/login?return=/app/history'; return null; }
-    }
-
-    async function logout() {
-      await authFetch(API + '/api/auth/logout', { method: 'POST' });
-      localStorage.removeItem('ctn_token');
-      window.location.href = '/login';
-    }
+    function logout() { CTN.logout('/login'); }
 
     async function init() {
-      const user = await checkAuth();
+      const user = await CTN.requireRole('installer', '/app/history');
       if (!user) return;
+
       document.getElementById('nav-user').textContent = user.email;
 
-      // Load history summary
       try {
-        const hist = await authFetch(API + '/api/installer/history').then(r => r.json());
-        document.getElementById('total-earned-inr').textContent = '₹' + hist.total_earned_inr.toLocaleString('en-IN');
-        document.getElementById('total-sold').textContent = hist.total;
-      } catch(e) {}
+        const history = await CTN.get('/api/installer/history');
+        document.getElementById('total-earned-inr').textContent = CTN.fmt.inr(history.total_earned_inr);
+        document.getElementById('total-sold').textContent = history.total;
+      } catch (e) {
+        console.error('Could not load earnings summary:', e);
+      }
 
-      loadCredits();
+      await loadCredits();
     }
 
     async function loadCredits() {
-      let url = API + `/api/installer/credits?page=${currentPage}&limit=${PAGE_SIZE}`;
-      if (currentFilter) url += `&status_filter=${currentFilter}`;
+      const list = document.getElementById('credits-list');
+      let path = `/api/installer/credits?page=${state.page}&limit=${PAGE_SIZE}`;
+      if (state.statusFilter) path += `&status_filter=${encodeURIComponent(state.statusFilter)}`;
+
       try {
-        const data = await authFetch(url).then(r => r.json());
-        totalPages = data.pages || 1;
+        const data = await CTN.get(path);
+        state.pages = data.pages || 1;
         renderCredits(data);
-      } catch(e) { console.error(e); }
+      } catch (e) {
+        list.innerHTML = `<div class="empty-state">
+          <div class="empty-title">Could not load credits</div>
+          <div class="empty-desc">${esc(e.message || 'Please try again.')}</div>
+        </div>`;
+      }
     }
 
     function renderCredits(data) {
       const list = document.getElementById('credits-list');
-      if (!data.credits || data.credits.length === 0) {
-        list.innerHTML = '<div class="empty-state"><div class="empty-title">No credits found</div><div class="empty-desc">Try a different filter or check back later.</div></div>';
-        return;
-      }
-      list.innerHTML = data.credits.map(c => `
+
+      list.innerHTML = data.credits.length ? data.credits.map(c => `
         <div class="history-item">
           <div>
-            <div class="history-id">#${c.credit_id} · ${c.device_id || ''} · ${(c.period_start || '').slice(0, 16)}</div>
-            <div class="history-kwh">${(c.total_kwh || 0).toFixed(2)} kWh · ${(c.co2_avoided_kg || 0).toFixed(1)} kg CO₂</div>
+            <div class="history-id">
+              #${c.credit_id} · ${esc(c.device_id || '')} · ${esc((c.period_start || '').slice(0, 16))}
+            </div>
+            <div class="history-kwh">
+              ${(c.total_kwh || 0).toFixed(2)} kWh · ${(c.co2_avoided_kg || 0).toFixed(1)} kg CO₂
+              ${c.on_chain_id ? ` · on-chain #${c.on_chain_id}` : ''}
+            </div>
           </div>
-          <span class="badge badge-${c.status}">${c.status}</span>
-        </div>
-      `).join('');
+          <span class="badge badge-${esc(c.status)}">${esc(c.status)}</span>
+        </div>`).join('')
+        : `<div class="empty-state">
+             <div class="empty-title">No credits found</div>
+             <div class="empty-desc">Try a different filter, or check back once more data arrives.</div>
+           </div>`;
 
-      document.getElementById('page-info').textContent = `page ${currentPage} of ${totalPages}`;
-      document.getElementById('prev-btn').disabled = currentPage <= 1;
-      document.getElementById('next-btn').disabled = currentPage >= totalPages;
+      document.getElementById('page-info').textContent = `page ${state.page} of ${state.pages}`;
+      document.getElementById('prev-btn').disabled = state.page <= 1;
+      document.getElementById('next-btn').disabled = state.page >= state.pages;
     }
 
     function filterStatus(status, btn) {
-      currentFilter = status;
-      currentPage = 1;
+      state.statusFilter = status;
+      state.page = 1;
       document.querySelectorAll('.tab-filter').forEach(t => t.classList.remove('active'));
       if (btn) btn.classList.add('active');
       loadCredits();
     }
 
-    function changePage(dir) {
-      const next = currentPage + dir;
-      if (next < 1 || next > totalPages) return;
-      currentPage = next;
+    function changePage(direction) {
+      const next = state.page + direction;
+      if (next < 1 || next > state.pages) return;
+      state.page = next;
       loadCredits();
     }
 

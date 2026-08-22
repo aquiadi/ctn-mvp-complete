@@ -1,5 +1,29 @@
-node_modules/
-.env
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# Secrets and local state
+.env
+.env.*
+!.env.example
+backend/.ctn-dev-secret
+cookie.txt
+
+# Databases — schema is created at startup; data is never committed
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# Editor / OS
 .DS_Store
+.idea/
+.vscode/

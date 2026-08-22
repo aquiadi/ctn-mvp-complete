@@ -1,36 +1,53 @@
 """
-CTN Marketplace Routes — browse listings, reserve, purchase, cancel.
-Atomic reservation prevents double-purchase of the same credit.
+CTN Marketplace — browse listings, reserve, purchase, cancel.
+
+Reservation is the concurrency-sensitive step: two buyers must never both be
+told they hold the same credit.
 """
 
-import time
 import json
-from fastapi import APIRouter, HTTPException, Depends, status
-from pydantic import BaseModel
-from typing import List, Optional
+import time
+from typing import List
 
-from database import database, db_execute_with_retry
-from auth import require_buyer, get_current_user
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+
+import config
+from auth import get_current_user, require_buyer
+from database import database
 
 router = APIRouter(prefix="/api/marketplace", tags=["marketplace"])
-
-# ── Config ─────────────────────────────────────────────────────────────────
-
-CREDIT_VALUE_USD = 5.0
-INR_RATE = 83
-RESERVATION_TIMEOUT_SECONDS = 15 * 60  # 15 minutes
 
 
 # ── Request models ─────────────────────────────────────────────────────────
 
-class ReserveRequest(BaseModel):
-    credit_ids: List[int]  # DB ids of credits to reserve
+class CreditSelection(BaseModel):
+    credit_ids: List[int] = Field(..., min_length=1, max_length=500)
+
 
 class PurchaseRequest(BaseModel):
-    reservation_ids: List[int]  # DB ids of reserved credits to finalize
+    reservation_ids: List[int] = Field(..., min_length=1, max_length=500)
 
-class CancelRequest(BaseModel):
-    credit_ids: List[int]
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+def _id_placeholders(prefix: str, ids: List[int]) -> tuple[str, dict]:
+    """
+    Build a parameterised `IN (...)` clause.
+
+    SQLite has no array binding, so placeholders are generated per id rather
+    than interpolating values into the statement.
+    """
+    keys = [f"{prefix}{i}" for i in range(len(ids))]
+    return ", ".join(f":{k}" for k in keys), dict(zip(keys, ids))
+
+
+def _pricing(quantity: int) -> dict:
+    return {
+        "quantity": quantity,
+        "total_usd": round(quantity * config.CREDIT_VALUE_USD, 2),
+        "total_inr": round(quantity * config.CREDIT_VALUE_INR, 2),
+    }
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────
@@ -39,257 +56,247 @@ class CancelRequest(BaseModel):
 async def browse_listings(
     page: int = 1,
     limit: int = 20,
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_user),
 ):
-    """
-    Browse available credits listed for sale on the marketplace.
-    Returns credits grouped/batched for buyer convenience.
-    """
-    offset = (page - 1) * limit
+    """Credits currently for sale, grouped into one batch per seller and location."""
+    page, limit = max(1, page), max(1, min(limit, 100))
 
-    # Get listed credit batches
     batches = await database.fetch_all(
-        query="""SELECT c.owner_user_id, u.email as seller_email, c.location,
-                 COUNT(c.id) as credit_count,
-                 SUM(c.total_kwh) as total_kwh,
-                 SUM(c.co2_avoided_kg) as co2_avoided_kg,
-                 GROUP_CONCAT(c.id) as credit_ids
+        query="""SELECT c.owner_user_id, u.email AS seller_email, c.location,
+                        COUNT(c.id)             AS credit_count,
+                        SUM(c.total_kwh)        AS total_kwh,
+                        SUM(c.co2_avoided_kg)   AS total_co2_kg,
+                        GROUP_CONCAT(c.id)      AS credit_ids
                  FROM credits c
                  LEFT JOIN users u ON c.owner_user_id = u.id
-                 WHERE c.status = 'listed' AND c.contract_version = 'new'
+                 WHERE c.status = 'listed'
                  GROUP BY c.owner_user_id, c.location, u.email
                  ORDER BY MAX(c.listed_at) DESC
                  LIMIT :limit OFFSET :offset""",
-        values={"limit": limit, "offset": offset}
+        values={"limit": limit, "offset": (page - 1) * limit},
     )
 
-    total = await database.fetch_one(
-        query="SELECT COUNT(*) as cnt FROM credits WHERE status = 'listed' AND contract_version = 'new'"
+    row = await database.fetch_one(
+        "SELECT COUNT(*) AS cnt FROM credits WHERE status = 'listed'"
     )
-    total_count = dict(total)["cnt"]
+    total_available = row["cnt"] if row else 0
 
-    # Format response
-    formatted_batches = []
-    for b in batches:
-        b_dict = dict(b)
-        # SQLite GROUP_CONCAT returns comma separated string of IDs
-        credit_ids = [int(i) for i in b_dict["credit_ids"].split(",")] if b_dict["credit_ids"] else []
-        formatted_batches.append({
-            "seller_email": b_dict["seller_email"],
-            "location": b_dict["location"],
-            "credit_count": b_dict["credit_count"],
-            "total_kwh": b_dict["total_kwh"],
-            "total_co2_kg": b_dict["co2_avoided_kg"],
-            "credits": [{"id": cid} for cid in credit_ids], # Stub format needed by frontend modal
-            "price_per_credit_usd": CREDIT_VALUE_USD,
-            "price_per_credit_inr": CREDIT_VALUE_USD * INR_RATE,
-        })
+    listings = []
+    for batch in batches:
+        batch = dict(batch)
+        credit_ids = [int(i) for i in (batch["credit_ids"] or "").split(",") if i]
+        listings.append(
+            {
+                "seller_email": batch["seller_email"],
+                "location": batch["location"],
+                "credit_count": batch["credit_count"],
+                "total_kwh": round(batch["total_kwh"] or 0, 2),
+                "total_co2_kg": round(batch["total_co2_kg"] or 0, 2),
+                "credit_ids": credit_ids,
+                "price_per_credit_usd": config.CREDIT_VALUE_USD,
+                "price_per_credit_inr": config.CREDIT_VALUE_INR,
+                "total_price_inr": round(batch["credit_count"] * config.CREDIT_VALUE_INR, 2),
+            }
+        )
 
     return {
-        "listings": formatted_batches,
-        "total_available": total_count,
+        "listings": listings,
+        "total_available": total_available,
         "page": page,
-        "pages": max(1, -(-total_count // limit)),
-        "price_per_credit_usd": CREDIT_VALUE_USD,
-        "price_per_credit_inr": CREDIT_VALUE_USD * INR_RATE,
+        "pages": max(1, -(-total_available // limit)),
+        "price_per_credit_usd": config.CREDIT_VALUE_USD,
+        "price_per_credit_inr": config.CREDIT_VALUE_INR,
+        "buyer_can_purchase": user["role"] == "buyer",
     }
 
 
 @router.post("/reserve")
-async def reserve_credits(req: ReserveRequest, user: dict = Depends(require_buyer)):
+async def reserve_credits(req: CreditSelection, user: dict = Depends(require_buyer)):
     """
-    Atomically reserve credits for purchase.
-    Uses SQLite's serialized writes to prevent double-reservation.
-    Returns 409 if any credit is already reserved or no longer available.
+    Hold credits for this buyer while they complete checkout.
+
+    The claim is a single conditional UPDATE, so concurrent buyers contend
+    inside SQLite rather than in application code. The rows are then read back
+    to confirm how many were actually won — checking availability with a
+    separate SELECT first would let two buyers both observe 'listed' and both
+    be told they succeeded.
     """
-    if not req.credit_ids:
-        raise HTTPException(400, "No credits specified")
+    requested = list(dict.fromkeys(req.credit_ids))
+    placeholders, id_values = _id_placeholders("id", requested)
+    claim_token = time.time()
 
-    now = time.time()
-    reserved_ids = []
-
-    for cid in req.credit_ids:
-        # Atomic check-and-update: only reserve if status is still 'listed' and contract is new
-        credit = await database.fetch_one(
-            query="SELECT id, status, contract_version FROM credits WHERE id = :id",
-            values={"id": cid}
+    async with database.transaction():
+        await database.execute(
+            query=f"""UPDATE credits
+                      SET status = 'reserved', reserved_by = :buyer_id, reserved_at = :claim
+                      WHERE id IN ({placeholders}) AND status = 'listed'""",
+            values={"buyer_id": user["id"], "claim": claim_token, **id_values},
         )
 
-        if not credit:
-            raise HTTPException(404, f"Credit #{cid} not found")
+        claimed = await database.fetch_all(
+            query=f"""SELECT id FROM credits
+                      WHERE id IN ({placeholders})
+                        AND status = 'reserved'
+                        AND reserved_by = :buyer_id
+                        AND reserved_at = :claim""",
+            values={"buyer_id": user["id"], "claim": claim_token, **id_values},
+        )
+        claimed_ids = [row["id"] for row in claimed]
 
-        c_dict = dict(credit)
-        if c_dict["status"] != "listed" or c_dict["contract_version"] != "new":
-            # Another buyer got here first, or credit was delisted
-            # Roll back any we already reserved in this batch
-            if reserved_ids:
-                placeholders = ", ".join([f":id{i}" for i in range(len(reserved_ids))])
-                values = {f"id{i}": rid for i, rid in enumerate(reserved_ids)}
-                await db_execute_with_retry(
-                    query=f"""UPDATE credits SET status = 'listed', reserved_by = NULL, reserved_at = NULL
-                             WHERE id IN ({placeholders})""",
-                    values=values
+        # All-or-nothing: a partial batch would leave the buyer holding credits
+        # they never agreed to buy on their own.
+        if len(claimed_ids) != len(requested):
+            if claimed_ids:
+                release_placeholders, release_values = _id_placeholders("rid", claimed_ids)
+                await database.execute(
+                    query=f"""UPDATE credits
+                              SET status = 'listed', reserved_by = NULL, reserved_at = NULL
+                              WHERE id IN ({release_placeholders})""",
+                    values=release_values,
                 )
+            unavailable = sorted(set(requested) - set(claimed_ids))
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"Credit #{cid} is no longer available — it was just purchased or reserved by another buyer. Please refresh and try again."
+                detail=(
+                    f"{len(unavailable)} of {len(requested)} credits are no longer "
+                    "available — another buyer reserved them first. Please refresh and try again."
+                ),
             )
-
-        # Reserve it
-        await db_execute_with_retry(
-            query="""UPDATE credits SET status = 'reserved', reserved_by = :buyer_id, reserved_at = :now
-                     WHERE id = :id AND status = 'listed'""",
-            values={"buyer_id": user["id"], "now": now, "id": cid}
-        )
-        reserved_ids.append(cid)
-
-    total_usd = len(reserved_ids) * CREDIT_VALUE_USD
-    total_inr = total_usd * INR_RATE
 
     return {
         "status": "reserved",
-        "reserved_credit_ids": reserved_ids,
-        "quantity": len(reserved_ids),
-        "total_usd": total_usd,
-        "total_inr": total_inr,
-        "expires_in_minutes": RESERVATION_TIMEOUT_SECONDS // 60,
-        "message": f"{len(reserved_ids)} credits reserved. Complete your purchase within {RESERVATION_TIMEOUT_SECONDS // 60} minutes."
+        "reserved_credit_ids": claimed_ids,
+        **_pricing(len(claimed_ids)),
+        "expires_in_minutes": config.RESERVATION_TIMEOUT_MINUTES,
+        "message": (
+            f"{len(claimed_ids)} credit(s) reserved. Complete your purchase within "
+            f"{config.RESERVATION_TIMEOUT_MINUTES} minutes."
+        ),
     }
 
 
 @router.post("/purchase")
 async def finalize_purchase(req: PurchaseRequest, user: dict = Depends(require_buyer)):
     """
-    Finalize purchase of reserved credits.
-    Payment is SIMULATED for MVP — clearly labeled.
-    Marks credits as 'sold', records transaction, would call retireCreditFor on-chain.
+    Complete the purchase of reserved credits.
+
+    Payment is simulated for the MVP; nothing is charged.
     """
-    if not req.reservation_ids:
-        raise HTTPException(400, "No credits specified")
-
+    requested = list(dict.fromkeys(req.reservation_ids))
+    placeholders, id_values = _id_placeholders("id", requested)
     now = time.time()
+    cutoff = now - config.RESERVATION_TIMEOUT_SECONDS
 
-    # Verify all credits are reserved by this buyer
-    reserved = []
-    for cid in req.reservation_ids:
-        credit = await database.fetch_one(
-            query="SELECT id, status, reserved_by, credit_id FROM credits WHERE id = :id",
-            values={"id": cid}
+    async with database.transaction():
+        held = await database.fetch_all(
+            query=f"""SELECT id, credit_id FROM credits
+                      WHERE id IN ({placeholders})
+                        AND status = 'reserved'
+                        AND reserved_by = :buyer_id
+                        AND reserved_at >= :cutoff""",
+            values={"buyer_id": user["id"], "cutoff": cutoff, **id_values},
         )
-        if not credit:
-            raise HTTPException(404, f"Credit #{cid} not found")
 
-        c = dict(credit)
-        if c["status"] != "reserved" or c["reserved_by"] != user["id"]:
+        if len(held) != len(requested):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"Credit #{cid} is not reserved by you. Your reservation may have expired."
+                detail=(
+                    "Some of these credits are no longer reserved by you — your "
+                    "reservation may have expired. Please start the purchase again."
+                ),
             )
-        reserved.append(c)
 
-    # Calculate totals
-    quantity = len(reserved)
-    total_usd = quantity * CREDIT_VALUE_USD
-    total_inr = total_usd * INR_RATE
-
-    # Mark credits as sold
-    for c in reserved:
-        await db_execute_with_retry(
-            query="""UPDATE credits SET status = 'sold', buyer_user_id = :buyer_id, sold_at = :now
-                     WHERE id = :id""",
-            values={"buyer_id": user["id"], "now": now, "id": c["id"]}
+        await database.execute(
+            query=f"""UPDATE credits
+                      SET status = 'sold', buyer_user_id = :buyer_id, sold_at = :now
+                      WHERE id IN ({placeholders})""",
+            values={"buyer_id": user["id"], "now": now, **id_values},
         )
 
-    # Record transaction
-    credit_ids_json = json.dumps([c["id"] for c in reserved])
-    txn_id = await db_execute_with_retry(
-        query="""INSERT INTO marketplace_transactions 
-                 (buyer_user_id, credit_ids, quantity, total_amount_usd, total_amount_inr,
-                  payment_status, payment_method, completed_at)
-                 VALUES (:buyer_id, :credit_ids, :quantity, :usd, :inr, 
-                         'completed', 'simulated', :now)""",
-        values={
-            "buyer_id": user["id"],
-            "credit_ids": credit_ids_json,
-            "quantity": quantity,
-            "usd": total_usd,
-            "inr": total_inr,
-            "now": now,
-        }
-    )
-
-    # Note: On-chain retirement via retireCreditFor would happen here
-    # For MVP, we record the sale off-chain only. On-chain retirement
-    # requires the Stage C.5 contract upgrade to be deployed first.
+        pricing = _pricing(len(held))
+        transaction_id = await database.execute(
+            query="""INSERT INTO marketplace_transactions
+                     (buyer_user_id, credit_ids, quantity, total_amount_usd,
+                      total_amount_inr, payment_status, payment_method, completed_at)
+                     VALUES (:buyer_id, :credit_ids, :quantity, :usd, :inr,
+                             'completed', 'simulated', :now)""",
+            values={
+                "buyer_id": user["id"],
+                "credit_ids": json.dumps([row["id"] for row in held]),
+                "quantity": pricing["quantity"],
+                "usd": pricing["total_usd"],
+                "inr": pricing["total_inr"],
+                "now": now,
+            },
+        )
 
     return {
         "status": "purchased",
-        "transaction_id": txn_id,
-        "quantity": quantity,
-        "total_usd": total_usd,
-        "total_inr": total_inr,
+        "transaction_id": transaction_id,
+        **pricing,
         "payment_method": "simulated",
         "payment_note": "SIMULATED — no real payment was processed. This is a testnet MVP.",
-        "credits_purchased": [c["credit_id"] for c in reserved],
+        "credits_purchased": [row["credit_id"] for row in held],
         "receipt": {
-            "transaction_id": txn_id,
+            "transaction_id": transaction_id,
             "date": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(now)),
-            "credits": quantity,
-            "total_co2_offset_note": "On-chain retirement will execute once contract upgrade is deployed.",
-        }
+            "credits": pricing["quantity"],
+            "co2_offset_kg": pricing["quantity"] * config.KG_CO2_PER_CREDIT,
+            "retirement_note": (
+                "An administrator retires these credits on-chain to finalise the offset."
+            ),
+        },
     }
 
 
 @router.post("/cancel-reservation")
-async def cancel_reservation(req: CancelRequest, user: dict = Depends(require_buyer)):
-    """Release reserved credits back to 'listed' status."""
-    released = 0
-    for cid in req.credit_ids:
-        credit = await database.fetch_one(
-            query="SELECT id, status, reserved_by FROM credits WHERE id = :id",
-            values={"id": cid}
+async def cancel_reservation(req: CreditSelection, user: dict = Depends(require_buyer)):
+    """Return this buyer's reserved credits to the marketplace."""
+    placeholders, id_values = _id_placeholders("id", list(dict.fromkeys(req.credit_ids)))
+
+    async with database.transaction():
+        released = await database.fetch_all(
+            query=f"""SELECT id FROM credits
+                      WHERE id IN ({placeholders})
+                        AND status = 'reserved' AND reserved_by = :buyer_id""",
+            values={"buyer_id": user["id"], **id_values},
         )
-        if not credit:
-            continue
-        c = dict(credit)
-        if c["status"] == "reserved" and c["reserved_by"] == user["id"]:
-            await db_execute_with_retry(
-                query="""UPDATE credits SET status = 'listed', reserved_by = NULL, reserved_at = NULL
-                         WHERE id = :id""",
-                values={"id": cid}
+        if released:
+            await database.execute(
+                query=f"""UPDATE credits
+                          SET status = 'listed', reserved_by = NULL, reserved_at = NULL
+                          WHERE id IN ({placeholders})
+                            AND status = 'reserved' AND reserved_by = :buyer_id""",
+                values={"buyer_id": user["id"], **id_values},
             )
-            released += 1
 
     return {
         "status": "released",
-        "credits_released": released,
-        "message": f"{released} credit(s) returned to the marketplace."
+        "credits_released": len(released),
+        "message": f"{len(released)} credit(s) returned to the marketplace.",
     }
 
 
 @router.get("/my-purchases")
-async def my_purchases(
-    page: int = 1,
-    limit: int = 20,
-    user: dict = Depends(require_buyer)
-):
-    """View buyer's purchase history."""
-    offset = (page - 1) * limit
-    txns = await database.fetch_all(
-        query="""SELECT * FROM marketplace_transactions 
+async def my_purchases(page: int = 1, limit: int = 20, user: dict = Depends(require_buyer)):
+    """This buyer's completed transactions."""
+    page, limit = max(1, page), max(1, min(limit, 100))
+
+    transactions = await database.fetch_all(
+        query="""SELECT * FROM marketplace_transactions
                  WHERE buyer_user_id = :user_id
-                 ORDER BY created_at DESC
-                 LIMIT :limit OFFSET :offset""",
-        values={"user_id": user["id"], "limit": limit, "offset": offset}
+                 ORDER BY created_at DESC LIMIT :limit OFFSET :offset""",
+        values={"user_id": user["id"], "limit": limit, "offset": (page - 1) * limit},
     )
-    total = await database.fetch_one(
-        query="SELECT COUNT(*) as cnt FROM marketplace_transactions WHERE buyer_user_id = :user_id",
-        values={"user_id": user["id"]}
+    row = await database.fetch_one(
+        "SELECT COUNT(*) AS cnt FROM marketplace_transactions WHERE buyer_user_id = :user_id",
+        {"user_id": user["id"]},
     )
+    total = row["cnt"] if row else 0
 
     return {
-        "purchases": [dict(t) for t in txns],
-        "total": dict(total)["cnt"],
+        "purchases": [dict(t) for t in transactions],
+        "total": total,
         "page": page,
-        "pages": max(1, -(-dict(total)["cnt"] // limit)),
+        "pages": max(1, -(-total // limit)),
     }

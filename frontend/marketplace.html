@@ -137,264 +137,280 @@
 
   <footer>CTN · Climate Trust Network · Simulated marketplace · Amoy Testnet</footer>
 
+  <script src="/static/ctn.js"></script>
   <script>
-    const API = 'https://ctn-api-railway-production.up.railway.app';
-    let currentUser = null;
-    let selectedCredits = [];
-    let reservedIds = [];
-    let purchaseStep = 'select'; // 'select' → 'confirm' → 'done'
+    const esc = CTN.fmt.escape;
 
-    // ── Auth-aware fetch wrapper ──
-    function authFetch(url, options = {}) {
-      const token = localStorage.getItem('ctn_token');
-      if (token) {
-        options.headers = options.headers || {};
-        if (typeof options.headers.set === 'function') {
-          options.headers.set('Authorization', 'Bearer ' + token);
-        } else {
-          options.headers['Authorization'] = 'Bearer ' + token;
-        }
-      }
-      options.credentials = 'include';
-      return fetch(url, options);
-    }
+    const state = {
+      user: null,
+      selectedCreditIds: [],
+      reservedIds: [],
+      step: 'select',   // select → confirm → done
+      pricePerCredit: 0,
+    };
 
-    async function checkAuth() {
-      try {
-        const r = await authFetch(API + '/api/auth/me');
-        if (!r.ok) throw new Error();
-        const d = await r.json();
-        if (d.user.role !== 'buyer') {
-          // Allow installers to browse but not buy
-          if (d.user.role === 'installer') {
-            document.querySelectorAll('.btn-buy').forEach(b => { b.disabled = true; b.title = 'Switch to a buyer account to purchase'; });
-          }
-          return d.user;
-        }
-        return d.user;
-      } catch(e) { window.location.href = '/login?role=buyer&return=/marketplace'; return null; }
-    }
-
-    async function logout() {
-      await authFetch(API + '/api/auth/logout', { method: 'POST' });
-      localStorage.removeItem('ctn_token');
-      window.location.href = '/login';
-    }
+    function logout() { CTN.logout('/login'); }
 
     async function init() {
-      currentUser = await checkAuth();
-      if (currentUser) {
-        document.getElementById('nav-user').innerHTML = `${currentUser.email} <span style="opacity:0.6;margin-left:4px;">(${currentUser.role})</span>`;
+      const user = await CTN.currentUser();
+      if (!user) {
+        window.location.href = '/login?role=buyer&return=/marketplace';
+        return;
       }
-      loadListings();
+
+      state.user = user;
+      document.getElementById('nav-user').innerHTML =
+        `${esc(user.email)} <span style="opacity:0.6;margin-left:4px;">(${esc(user.role)})</span>`;
+
+      await loadListings();
     }
 
     async function loadListings() {
+      const container = document.getElementById('listings-container');
+
       try {
-        const data = await authFetch(API + '/api/marketplace/listings', { 
-          headers: {
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'Pragma': 'no-cache'
-          }
-        }).then(r => r.json());
+        const data = await CTN.get('/api/marketplace/listings');
+        state.pricePerCredit = data.price_per_credit_inr;
 
         document.getElementById('market-stats').innerHTML = `
           <div class="market-stat">
-            <div class="market-stat-value green">${data.total_available}</div>
+            <div class="market-stat-value green">${CTN.fmt.number(data.total_available)}</div>
             <div class="market-stat-label">Credits available</div>
           </div>
           <div class="market-stat">
-            <div class="market-stat-value">₹${data.price_per_credit_inr}</div>
+            <div class="market-stat-value">${CTN.fmt.inr(data.price_per_credit_inr)}</div>
             <div class="market-stat-label">Per credit</div>
           </div>
           <div class="market-stat">
-            <div class="market-stat-value">₹${(data.total_available * data.price_per_credit_inr).toLocaleString('en-IN')}</div>
+            <div class="market-stat-value">${CTN.fmt.inr(data.total_available * data.price_per_credit_inr)}</div>
             <div class="market-stat-label">Total value</div>
-          </div>
-        `;
+          </div>`;
 
-        const container = document.getElementById('listings-container');
-        if (!data.listings || data.listings.length === 0) {
+        if (!data.listings.length) {
           container.innerHTML = `
             <div class="empty-state">
               <div style="font-size:2rem;margin-bottom:0.75rem;opacity:0.4;">☀</div>
               <div class="empty-title">No credits listed yet</div>
-              <div class="empty-desc">Credits appear here when solar installers list them for sale. Check back soon.</div>
+              <div class="empty-desc">Credits appear here once installers list them for sale.</div>
             </div>`;
           return;
         }
 
-        container.innerHTML = data.listings.map((listing, i) => `
-          <div class="listing-card">
-            <div class="listing-header">
-              <div>
-                <div class="listing-location">${listing.location || 'India'}</div>
-                <div class="listing-seller">Seller: ${listing.seller_email || 'Anonymous'}</div>
-              </div>
-              <div class="listing-badge">${listing.credit_count} credits</div>
-            </div>
-            <div class="listing-stats">
-              <div class="listing-stat">
-                <div class="listing-stat-value">${(listing.total_co2_kg / 1000).toFixed(0)}</div>
-                <div class="listing-stat-label">Tonnes CO₂ avoided</div>
-              </div>
-              <div class="listing-stat">
-                <div class="listing-stat-value">₹${(listing.credit_count * listing.price_per_credit_inr).toLocaleString('en-IN')}</div>
-                <div class="listing-stat-label">Total price</div>
-              </div>
-            </div>
-            <div class="listing-price">
-              <div class="listing-price-value">₹${listing.price_per_credit_inr} per credit</div>
-              <button class="btn-buy" onclick='openPurchase(${JSON.stringify(listing.credits.map(c => c.id))}, ${listing.credit_count}, ${listing.credit_count * listing.price_per_credit_inr})'
-                ${(!currentUser || currentUser.role !== 'buyer') ? 'disabled' : ''}>
-                ${!currentUser ? 'Log in to buy →' : (currentUser.role !== 'buyer' ? 'Buyers only →' : `Buy ${listing.credit_count} credits →`)}
-              </button>
-            </div>
-          </div>
-        `).join('');
+        container.innerHTML = data.listings.map((listing, index) =>
+          renderListing(listing, index, data.buyer_can_purchase)).join('');
 
-      } catch(e) {
-        console.error(e);
-        document.getElementById('listings-container').innerHTML = `
+        // Attach handlers in JS rather than inline, so credit id arrays never
+        // have to be serialised into an HTML attribute.
+        data.listings.forEach((listing, index) => {
+          const button = document.getElementById(`buy-${index}`);
+          if (button && data.buyer_can_purchase) {
+            button.addEventListener('click', () => openPurchase(listing));
+          }
+        });
+      } catch (e) {
+        console.error('Marketplace load failed:', e);
+        container.innerHTML = `
           <div class="empty-state">
-            <div class="empty-title">Could not load marketplace</div>
-            <div class="empty-desc">Please refresh or try again later.</div>
+            <div class="empty-title">Could not load the marketplace</div>
+            <div class="empty-desc">${esc(e.message || 'Please refresh and try again.')}</div>
           </div>`;
       }
     }
 
-    function openPurchase(creditIds, count, totalInr) {
-      selectedCredits = creditIds;
-      reservedIds = [];
-      purchaseStep = 'select';
+    function renderListing(listing, index, canPurchase) {
+      const label = canPurchase
+        ? `Buy ${listing.credit_count} credit(s) →`
+        : 'Buyers only →';
+
+      return `
+        <div class="listing-card">
+          <div class="listing-header">
+            <div>
+              <div class="listing-location">${esc(listing.location || 'India')}</div>
+              <div class="listing-seller">Seller: ${esc(listing.seller_email || 'Anonymous')}</div>
+            </div>
+            <div class="listing-badge">${listing.credit_count} credits</div>
+          </div>
+          <div class="listing-stats">
+            <div class="listing-stat">
+              <div class="listing-stat-value">${CTN.fmt.number(listing.total_co2_kg / 1000)}</div>
+              <div class="listing-stat-label">Tonnes CO₂ avoided</div>
+            </div>
+            <div class="listing-stat">
+              <div class="listing-stat-value">${CTN.fmt.inr(listing.total_price_inr)}</div>
+              <div class="listing-stat-label">Total price</div>
+            </div>
+          </div>
+          <div class="listing-price">
+            <div class="listing-price-value">${CTN.fmt.inr(listing.price_per_credit_inr)} per credit</div>
+            <button class="btn-buy" id="buy-${index}" ${canPurchase ? '' : 'disabled title="Switch to a buyer account to purchase"'}>
+              ${label}
+            </button>
+          </div>
+        </div>`;
+    }
+
+    // ── Purchase ──
+
+    function openPurchase(listing) {
+      state.selectedCreditIds = listing.credit_ids;
+      state.reservedIds = [];
+      state.step = 'select';
 
       document.getElementById('modal-title').textContent = 'Purchase credits';
-      document.getElementById('modal-desc').textContent = `You're about to purchase ${count} verified carbon credits.`;
+      document.getElementById('modal-desc').textContent =
+        `You are about to purchase ${listing.credit_count} verified carbon credit(s).`;
       document.getElementById('modal-body').innerHTML = `
         <div style="background:var(--bg2);border-radius:var(--radius-sm);padding:1rem;font-size:12px;">
-          <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Credits</span><span>${count}</span></div>
-          <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Price per credit</span><span>₹${(5 * 83).toLocaleString('en-IN')}</span></div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span>Credits</span><span>${listing.credit_count}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span>Price per credit</span><span>${CTN.fmt.inr(listing.price_per_credit_inr)}</span>
+          </div>
           <div style="border-top:1px solid var(--border);margin:8px 0;"></div>
-          <div style="display:flex;justify-content:space-between;font-weight:500;"><span>Total</span><span>₹${totalInr.toLocaleString('en-IN')}</span></div>
+          <div style="display:flex;justify-content:space-between;font-weight:500;">
+            <span>Total</span><span>${CTN.fmt.inr(listing.total_price_inr)}</span>
+          </div>
         </div>
-        <div style="font-size:10px;color:var(--amber);margin-top:0.5rem;text-align:center;font-weight:500;">SIMULATED — no real payment will be charged</div>
-      `;
+        <div style="font-size:10px;color:var(--amber);margin-top:0.5rem;text-align:center;font-weight:500;">
+          SIMULATED — no real payment will be charged
+        </div>`;
+
+      const confirm = document.getElementById('modal-confirm');
+      confirm.textContent = 'Reserve credits →';
+      confirm.disabled = false;
+
       document.getElementById('modal-error').classList.remove('visible');
-      document.getElementById('modal-confirm').textContent = 'Reserve credits →';
-      document.getElementById('modal-confirm').disabled = false;
       document.getElementById('modal-footer').style.display = 'flex';
       document.getElementById('purchase-modal').classList.add('visible');
     }
 
     function closeModal() {
       document.getElementById('purchase-modal').classList.remove('visible');
-      // If we reserved but didn't complete, cancel the reservation
-      if (reservedIds.length > 0 && purchaseStep !== 'done') {
-        authFetch(API + '/api/marketplace/cancel-reservation', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ credit_ids: reservedIds })
-        }).catch(() => {});
+
+      // Release the hold if the buyer backs out after reserving, so the credits
+      // return to the marketplace immediately rather than waiting for timeout.
+      if (state.reservedIds.length && state.step !== 'done') {
+        CTN.post('/api/marketplace/cancel-reservation', { credit_ids: state.reservedIds })
+           .catch(() => {});
+        state.reservedIds = [];
       }
+    }
+
+    function showModalError(message) {
+      const el = document.getElementById('modal-error');
+      el.textContent = message;
+      el.classList.add('visible');
     }
 
     async function handlePurchaseStep() {
       const btn = document.getElementById('modal-confirm');
-      const errEl = document.getElementById('modal-error');
-      errEl.classList.remove('visible');
+      document.getElementById('modal-error').classList.remove('visible');
 
-      if (purchaseStep === 'select') {
-        // Step 1: Reserve
-        btn.disabled = true; btn.textContent = 'Reserving...';
+      if (state.step === 'select') {
+        btn.disabled = true;
+        btn.textContent = 'Reserving...';
         try {
-          const r = await authFetch(API + '/api/marketplace/reserve', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ credit_ids: selectedCredits })
-          });
-          const data = await r.json();
-          if (!r.ok) {
-            errEl.textContent = data.detail || 'Reservation failed. These credits may have been purchased by another buyer.';
-            errEl.classList.add('visible');
-            btn.disabled = false; btn.textContent = 'Reserve credits →';
-            return;
-          }
-          reservedIds = data.reserved_credit_ids;
-          purchaseStep = 'confirm';
+          const reservation = await CTN.post('/api/marketplace/reserve',
+            { credit_ids: state.selectedCreditIds });
+
+          state.reservedIds = reservation.reserved_credit_ids;
+          state.step = 'confirm';
+
           document.getElementById('modal-title').textContent = 'Confirm payment';
-          document.getElementById('modal-desc').textContent = `${data.quantity} credits reserved for ${data.expires_in_minutes} minutes. Confirm to complete your purchase.`;
+          document.getElementById('modal-desc').textContent =
+            `${reservation.quantity} credit(s) held for ${reservation.expires_in_minutes} minutes. ` +
+            `Confirm to complete your purchase.`;
           btn.textContent = 'Confirm purchase →';
+        } catch (e) {
+          showModalError(e.message || 'Reservation failed. Please refresh and try again.');
+          btn.textContent = 'Reserve credits →';
+        } finally {
           btn.disabled = false;
-        } catch(e) {
-          errEl.textContent = 'Network error. Please try again.';
-          errEl.classList.add('visible');
-          btn.disabled = false; btn.textContent = 'Reserve credits →';
         }
-      } else if (purchaseStep === 'confirm') {
-        // Step 2: Purchase
-        btn.disabled = true; btn.textContent = 'Processing...';
+        return;
+      }
+
+      if (state.step === 'confirm') {
+        btn.disabled = true;
+        btn.textContent = 'Processing...';
         try {
-          const r = await authFetch(API + '/api/marketplace/purchase', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ reservation_ids: reservedIds })
-          });
-          const data = await r.json();
-          if (!r.ok) {
-            errEl.textContent = data.detail || 'Purchase failed. Your reservation may have expired.';
-            errEl.classList.add('visible');
-            btn.disabled = false; btn.textContent = 'Confirm purchase →';
-            return;
-          }
-          purchaseStep = 'done';
-          document.getElementById('modal-title').textContent = 'Purchase complete';
-          document.getElementById('modal-desc').textContent = '';
-          document.getElementById('modal-body').innerHTML = `
-            <div class="receipt">
-              <div class="receipt-title">✓ Carbon credits purchased</div>
-              <div class="receipt-row"><span>Transaction ID</span><span>#${data.transaction_id}</span></div>
-              <div class="receipt-row"><span>Credits purchased</span><span>${data.quantity}</span></div>
-              <div class="receipt-row"><span>Total paid</span><span>₹${data.total_inr.toLocaleString('en-IN')}</span></div>
-              <div class="receipt-row"><span>Date</span><span>${data.receipt.date}</span></div>
-              <div class="receipt-sim">SIMULATED PAYMENT — no real money was transferred</div>
-            </div>
-          `;
-          document.getElementById('modal-footer').innerHTML = `
-            <button class="btn-confirm" onclick="closeModal(); loadListings();">Done</button>
-          `;
-        } catch(e) {
-          errEl.textContent = 'Network error during purchase. Please check your purchases page — the transaction may have completed.';
-          errEl.classList.add('visible');
-          btn.disabled = false; btn.textContent = 'Retry →';
+          const result = await CTN.post('/api/marketplace/purchase',
+            { reservation_ids: state.reservedIds });
+
+          state.step = 'done';
+          renderReceipt(result);
+        } catch (e) {
+          showModalError(e.message ||
+            'Purchase failed. Check your purchases — the transaction may have completed.');
+          btn.textContent = 'Retry →';
+          btn.disabled = false;
         }
       }
     }
 
+    function renderReceipt(result) {
+      document.getElementById('modal-title').textContent = 'Purchase complete';
+      document.getElementById('modal-desc').textContent = '';
+      document.getElementById('modal-body').innerHTML = `
+        <div class="receipt">
+          <div class="receipt-title">✓ Carbon credits purchased</div>
+          <div class="receipt-row"><span>Transaction ID</span><span>#${result.transaction_id}</span></div>
+          <div class="receipt-row"><span>Credits purchased</span><span>${result.quantity}</span></div>
+          <div class="receipt-row"><span>CO₂ offset</span><span>${CTN.fmt.number(result.receipt.co2_offset_kg)} kg</span></div>
+          <div class="receipt-row"><span>Total paid</span><span>${CTN.fmt.inr(result.total_inr)}</span></div>
+          <div class="receipt-row"><span>Date</span><span>${esc(result.receipt.date)}</span></div>
+          <div class="receipt-sim">SIMULATED PAYMENT — no real money was transferred</div>
+        </div>`;
+      document.getElementById('modal-footer').innerHTML =
+        `<button class="btn-confirm" onclick="closeModal(); loadListings();">Done</button>`;
+    }
+
+    // ── Purchase history ──
+
     async function showPurchases() {
+      const container = document.getElementById('listings-container');
       try {
-        const data = await authFetch(API + '/api/marketplace/my-purchases').then(r => r.json());
-        const container = document.getElementById('listings-container');
-        if (!data.purchases || data.purchases.length === 0) {
-          container.innerHTML = '<div class="empty-state"><div class="empty-title">No purchases yet</div><div class="empty-desc">Browse credits and make your first purchase.</div></div>';
+        const data = await CTN.get('/api/marketplace/my-purchases');
+
+        const back = `<div style="margin-bottom:1rem;">
+          <a href="#" onclick="event.preventDefault();loadListings();"
+             style="font-size:12px;color:var(--green);text-decoration:none;">← Back to marketplace</a>
+        </div>`;
+
+        if (!data.purchases.length) {
+          container.innerHTML = back + `
+            <div class="empty-state">
+              <div class="empty-title">No purchases yet</div>
+              <div class="empty-desc">Browse the credits above to make your first purchase.</div>
+            </div>`;
           return;
         }
-        container.innerHTML = `<div style="margin-bottom:1rem;"><a href="/marketplace" style="font-size:12px;color:var(--green);text-decoration:none;">← Back to marketplace</a></div>` +
-          data.purchases.map(p => `
-            <div class="listing-card">
-              <div class="listing-header">
-                <div>
-                  <div class="listing-location">Purchase #${p.id}</div>
-                  <div class="listing-seller">${new Date(p.completed_at * 1000).toLocaleDateString('en-IN')}</div>
-                </div>
-                <div class="listing-badge">${p.quantity} credits</div>
+
+        container.innerHTML = back + data.purchases.map(p => `
+          <div class="listing-card">
+            <div class="listing-header">
+              <div>
+                <div class="listing-location">Purchase #${p.id}</div>
+                <div class="listing-seller">${CTN.fmt.timestamp(p.completed_at || p.created_at)}</div>
               </div>
-              <div class="listing-price">
-                <div class="listing-price-value">₹${p.total_amount_inr.toLocaleString('en-IN')}</div>
-                <span style="font-size:10px;color:var(--amber);font-weight:500;">${p.payment_method.toUpperCase()}</span>
-              </div>
+              <div class="listing-badge">${p.quantity} credits</div>
             </div>
-          `).join('');
-      } catch(e) { console.error(e); }
+            <div class="listing-price">
+              <div class="listing-price-value">${CTN.fmt.inr(p.total_amount_inr)}</div>
+              <span style="font-size:10px;color:var(--amber);font-weight:500;">
+                ${esc((p.payment_method || '').toUpperCase())}
+              </span>
+            </div>
+          </div>`).join('');
+      } catch (e) {
+        console.error('Could not load purchases:', e);
+        container.innerHTML = `<div class="empty-state">
+          <div class="empty-title">Could not load your purchases</div>
+          <div class="empty-desc">${esc(e.message || 'Please try again.')}</div>
+        </div>`;
+      }
     }
 
     init();

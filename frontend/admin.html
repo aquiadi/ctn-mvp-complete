@@ -72,6 +72,22 @@
     @keyframes fadeUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
     .fade-up { animation: fadeUp 0.3s ease forwards; }
     @media (max-width: 600px) { .nav-tabs { display: none; } .cols-4, .cols-5, .cols-log { grid-template-columns: 1fr; } }
+    .input-sm { padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: var(--mono); font-size: 11px; background: var(--card); color: var(--text); }
+    .form-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .form-row .input-sm { flex: 1 1 160px; min-width: 0; }
+    .form-help { font-size: 11px; color: var(--text3); margin-bottom: 0.75rem; line-height: 1.5; }
+    .form-help code { background: var(--bg2); padding: 1px 5px; border-radius: 4px; }
+    .form-result { font-size: 11px; margin-top: 0.6rem; line-height: 1.5; }
+    .form-result.ok { color: var(--green); }
+    .form-result.err { color: var(--red); }
+    .notice-strip { font-size: 11px; padding: 0.6rem 0.85rem; border-radius: var(--radius-sm); margin-bottom: 1rem; display: none; }
+    .notice-strip.visible { display: block; }
+    .notice-strip.warn { background: var(--amber-light); color: var(--amber); }
+    .cols-7 { grid-template-columns: 0.7fr 1.4fr 1.4fr 0.9fr 0.9fr 0.9fr 1.1fr; }
+    .cols-txn { grid-template-columns: 0.6fr 1.6fr 0.8fr 1fr 1.4fr; }
+    .link { color: var(--blue); text-decoration: none; }
+    .link:hover { text-decoration: underline; }
+    .badge-reserved { background: var(--amber-light); color: var(--amber); }
   </style>
 </head>
 <body>
@@ -83,6 +99,8 @@
         <button class="nav-tab active" onclick="showSection('overview')">Overview</button>
         <button class="nav-tab" onclick="showSection('installers')">Installers</button>
         <button class="nav-tab" onclick="showSection('credits')">Credits</button>
+        <button class="nav-tab" onclick="showSection('devices')">Devices &amp; data</button>
+        <button class="nav-tab" onclick="showSection('transactions')">Transactions</button>
         <button class="nav-tab" onclick="showSection('audit')">Audit log</button>
         <button class="nav-tab" onclick="showSection('health')">Health</button>
       </div>
@@ -122,18 +140,21 @@
         <p class="page-label">System Credits</p>
         <h1>All platform credits</h1>
       </div>
+      <div class="notice-strip" id="chain-status"></div>
       <div class="card fade-up fade-up-2">
-        <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
-          <div class="card-title" style="margin-bottom:0;">Manual Mint</div>
-          <div style="display:flex; gap:8px;">
-            <input type="number" id="manual-mint-id" placeholder="Credit ID" style="padding:4px 8px; border:1px solid var(--border); border-radius:var(--radius-sm); font-family:var(--mono); font-size:11px; width:120px;">
-            <button class="btn-sm" onclick="mintManualCredit()">Mint ID on-chain</button>
+        <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; gap:8px; flex-wrap:wrap;">
+          <div class="card-title" style="margin-bottom:0;">Credit ledger</div>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <select id="credits-status-filter" class="input-sm" onchange="loadCredits(1)">
+              <option value="">All statuses</option>
+              <option value="verified">Verified</option>
+              <option value="listed">Listed</option>
+              <option value="reserved">Reserved</option>
+              <option value="sold">Sold</option>
+              <option value="retired">Retired</option>
+            </select>
+            <span class="page-info" id="credits-page-info"></span>
           </div>
-        </div>
-        <div style="border-top:1px solid var(--border); margin:1rem 0 -0.25rem 0;"></div>
-        <div class="card-header" style="margin-top:1rem;">
-          <div class="card-title">Credit ledger</div>
-          <div class="page-info" id="credits-page-info"></div>
         </div>
         <div id="credits-list"></div>
         <div class="pagination">
@@ -157,6 +178,51 @@
       </div>
     </div>
 
+    <!-- DEVICES & DATA -->
+    <div class="section" id="sec-devices">
+      <div class="page-header"><p class="page-label">Operations</p><h1>Devices &amp; data</h1></div>
+
+      <div class="card">
+        <div class="card-title">Register a device</div>
+        <div class="form-row">
+          <input id="device-id" class="input-sm" placeholder="Device ID">
+          <input id="device-owner" class="input-sm" placeholder="Installer email">
+          <input id="device-location" class="input-sm" placeholder="Location">
+          <button class="btn-sm" onclick="registerDevice()">Register</button>
+        </div>
+        <div class="form-result" id="device-result"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Ingest generation readings (CSV)</div>
+        <p class="form-help">
+          Columns: <code>device_id, timestamp, delta_kwh</code>. Readings accumulate
+          into one-tonne credits automatically. Re-uploading the same file is a no-op.
+        </p>
+        <div class="form-row">
+          <input type="file" id="csv-file" accept=".csv,text/csv" class="input-sm">
+          <button class="btn-sm" onclick="ingestCsv()">Upload</button>
+        </div>
+        <div class="form-result" id="csv-result"></div>
+      </div>
+    </div>
+
+    <!-- TRANSACTIONS -->
+    <div class="section" id="sec-transactions">
+      <div class="page-header"><p class="page-label">Marketplace</p><h1>Transactions</h1></div>
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Completed purchases</div>
+          <div class="page-info" id="transactions-page-info"></div>
+        </div>
+        <div id="transactions-list"><div class="empty-note">Loading...</div></div>
+        <div class="pagination">
+          <button class="btn-page" onclick="loadTransactions(transactionsPage - 1)" id="transactions-prev" disabled>← prev</button>
+          <button class="btn-page" onclick="loadTransactions(transactionsPage + 1)" id="transactions-next">next →</button>
+        </div>
+      </div>
+    </div>
+
     <!-- HEALTH -->
     <div class="section" id="sec-health">
       <div class="page-header"><p class="page-label">System</p><h1>Health check</h1></div>
@@ -169,227 +235,376 @@
 
   <footer>CTN Admin · Not linked from public site · Direct access only</footer>
 
+  <script src="/static/ctn.js"></script>
   <script>
-    const API = 'https://ctn-api-railway-production.up.railway.app';
-    let creditsPage = 1, auditPage = 1;
+    const esc = CTN.fmt.escape;
+    const ts = CTN.fmt.timestamp;
 
-    // ── Auth-aware fetch wrapper ──
-    function authFetch(url, options = {}) {
-      const token = localStorage.getItem('ctn_token');
-      if (token) {
-        options.headers = options.headers || {};
-        if (typeof options.headers.set === 'function') {
-          options.headers.set('Authorization', 'Bearer ' + token);
-        } else {
-          options.headers['Authorization'] = 'Bearer ' + token;
-        }
-      }
-      options.credentials = 'include';
-      return fetch(url, options);
-    }
+    let creditsPage = 1, auditPage = 1, transactionsPage = 1;
+    let settings = null;
 
-    async function checkAuth() {
-      try {
-        const r = await authFetch(API + '/api/auth/me');
-        if (!r.ok) throw new Error();
-        const d = await r.json();
-        if (d.user.role !== 'admin') { window.location.href = '/login'; return null; }
-        return d.user;
-      } catch(e) { window.location.href = '/login'; return null; }
-    }
+    function logout() { CTN.logout('/login'); }
 
-    async function logout() {
-      await authFetch(API + '/api/auth/logout', { method: 'POST' });
-      localStorage.removeItem('ctn_token');
-      window.location.href = '/login';
-    }
+    // ── Navigation ──
+
+    const LOADERS = {
+      overview: loadOverview,
+      installers: loadInstallers,
+      credits: () => loadCredits(1),
+      devices: () => {},
+      transactions: () => loadTransactions(1),
+      audit: () => loadAudit(1),
+      health: loadHealth,
+    };
+
+    // Move the section name from the inline handler onto a data attribute and
+    // bind a real listener, so navigation never depends on the implicit global
+    // `event` and the tab for a section can still be found by name.
+    document.querySelectorAll('.nav-tab').forEach(tab => {
+      const name = tab.getAttribute('onclick').match(/'([^']+)'/)[1];
+      tab.removeAttribute('onclick');
+      tab.dataset.section = name;
+      tab.addEventListener('click', () => showSection(name));
+    });
 
     function showSection(name) {
       document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
       document.getElementById('sec-' + name).classList.add('active');
-      document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-      event.target.classList.add('active');
-      if (name === 'installers') loadInstallers();
-      if (name === 'credits') loadCredits(1);
-      if (name === 'audit') loadAudit(1);
-      if (name === 'health') loadHealth();
+
+      document.querySelectorAll('.nav-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.section === name);
+      });
+
+      (LOADERS[name] || (() => {}))();
     }
 
-    function ts(epoch) {
-      if (!epoch) return '—';
-      return new Date(epoch * 1000).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' });
-    }
+    // ── Init ──
 
     async function init() {
-      const user = await checkAuth();
+      const user = await CTN.requireRole('admin', '/admin');
       if (!user) return;
+
       document.getElementById('admin-email').textContent = user.email;
-      loadOverview();
+
+      try {
+        settings = await CTN.settings();
+      } catch (e) {
+        console.error('Could not load settings:', e);
+      }
+
+      if (settings && !settings.chain_writes_enabled) {
+        const strip = document.getElementById('chain-status');
+        strip.textContent =
+          'On-chain minting and retirement are disabled — this server has no signing key configured.';
+        strip.className = 'notice-strip warn visible';
+      }
+
+      await loadOverview();
     }
+
+    // ── Overview ──
 
     async function loadOverview() {
       try {
-        const [ov, audit] = await Promise.all([
-          authFetch(API + '/api/admin/overview').then(r => r.json()),
-          authFetch(API + '/api/admin/audit-log?limit=5').then(r => r.json())
+        const [overview, audit] = await Promise.all([
+          CTN.get('/api/admin/overview'),
+          CTN.get('/api/admin/audit-log?limit=5'),
         ]);
-        const u = ov.users, c = ov.credits, t = ov.transactions;
-        document.getElementById('overview-stats').innerHTML = `
-          <div class="stat-mini"><div class="stat-mini-value">${u.installers || 0}</div><div class="stat-mini-label">Installers</div></div>
-          <div class="stat-mini"><div class="stat-mini-value">${u.buyers || 0}</div><div class="stat-mini-label">Buyers</div></div>
-          <div class="stat-mini"><div class="stat-mini-value">${c.total || 0}</div><div class="stat-mini-label">Total credits</div></div>
-          <div class="stat-mini"><div class="stat-mini-value green">${c.verified || 0}</div><div class="stat-mini-label">Verified</div></div>
-          <div class="stat-mini"><div class="stat-mini-value">${c.listed || 0}</div><div class="stat-mini-label">Listed</div></div>
-          <div class="stat-mini"><div class="stat-mini-value amber">${c.sold || 0}</div><div class="stat-mini-label">Sold</div></div>
-          <div class="stat-mini"><div class="stat-mini-value green">₹${(t.total_inr || 0).toLocaleString('en-IN')}</div><div class="stat-mini-label">Revenue</div></div>
-        `;
 
-        if (audit.logs && audit.logs.length > 0) {
-          document.getElementById('overview-audit-list').innerHTML = audit.logs.map(l => `
-            <div class="table-row cols-log">
-              <div>${ts(l.created_at)}</div>
-              <div>${l.admin_email || '—'}</div>
-              <div><span class="badge badge-${l.action === 'mint' ? 'verified' : 'retired'}">${l.action}</span></div>
-              <div style="color:var(--text2);">${l.reason || '—'}</div>
-            </div>
-          `).join('');
-        } else {
-          document.getElementById('overview-audit-list').innerHTML = '<div class="empty-note">No audit entries yet. Admin actions will appear here.</div>';
-        }
-      } catch(e) { console.error(e); }
+        const { users: u, credits: c, transactions: t } = overview;
+        document.getElementById('overview-stats').innerHTML = [
+          ['Installers', u.installers, ''],
+          ['Buyers', u.buyers, ''],
+          ['Total credits', c.total, ''],
+          ['Verified', c.verified, 'green'],
+          ['Minted on-chain', c.minted, 'green'],
+          ['Listed', c.listed, ''],
+          ['Sold', c.sold, 'amber'],
+          ['Retired', c.retired, ''],
+          ['Revenue', CTN.fmt.inr(t.total_inr), 'green'],
+        ].map(([label, value, tone]) => `
+          <div class="stat-mini">
+            <div class="stat-mini-value ${tone}">${typeof value === 'number' ? CTN.fmt.number(value) : value}</div>
+            <div class="stat-mini-label">${label}</div>
+          </div>`).join('');
+
+        document.getElementById('overview-audit-list').innerHTML = audit.logs.length
+          ? audit.logs.map(auditRow).join('')
+          : '<div class="empty-note">No audit entries yet. Admin actions appear here.</div>';
+      } catch (e) {
+        console.error('Overview failed:', e);
+      }
     }
 
+    function auditRow(entry) {
+      return `
+        <div class="table-row cols-log">
+          <div>${ts(entry.created_at)}</div>
+          <div>${esc(entry.admin_email || '—')}</div>
+          <div>${esc(entry.action)} ${esc(entry.target_type)} ${esc(entry.target_id || '')}</div>
+          <div style="color:var(--text2);">${esc(entry.reason || '—')}</div>
+        </div>`;
+    }
+
+    // ── Installers ──
+
     async function loadInstallers() {
+      const list = document.getElementById('installers-list');
       try {
-        const data = await authFetch(API + '/api/admin/installers').then(r => r.json());
-        const list = document.getElementById('installers-list');
-        if (!data.installers || data.installers.length === 0) {
-          list.innerHTML = '<div class="empty-note">No installer accounts yet.</div>';
-          return;
-        }
-        list.innerHTML = `
+        const data = await CTN.get('/api/admin/installers');
+        list.innerHTML = data.installers.length ? `
           <div class="table-row cols-4 header"><div>Email</div><div>Wallet</div><div>Credits</div><div>kWh</div></div>
           ${data.installers.map(i => `
             <div class="table-row cols-4">
-              <div>${i.email}</div>
-              <div style="font-size:10px;color:var(--text3);">${i.wallet_address ? i.wallet_address.slice(0,8) + '...' : 'Not linked'}</div>
-              <div>${i.credit_count}</div>
-              <div>${Math.round(i.total_kwh).toLocaleString()}</div>
-            </div>
-          `).join('')}
-        `;
-      } catch(e) { console.error(e); }
+              <div>${esc(i.email)}</div>
+              <div style="font-size:10px;color:var(--text3);">
+                ${i.wallet_address ? esc(i.wallet_address.slice(0, 10)) + '…' : 'Not linked'}
+              </div>
+              <div>${CTN.fmt.number(i.credit_count)}</div>
+              <div>${CTN.fmt.number(i.total_kwh)}</div>
+            </div>`).join('')}`
+          : '<div class="empty-note">No installer accounts yet.</div>';
+      } catch (e) {
+        list.innerHTML = `<div class="empty-note">${esc(e.message)}</div>`;
+      }
     }
+
+    // ── Credits ──
 
     async function loadCredits(page) {
       if (page < 1) return;
       creditsPage = page;
+
+      const list = document.getElementById('credits-list');
+      const statusFilter = document.getElementById('credits-status-filter').value;
+      let path = `/api/admin/credits?page=${page}&limit=30`;
+      if (statusFilter) path += `&status_filter=${encodeURIComponent(statusFilter)}`;
+
       try {
-        const data = await authFetch(API + `/api/admin/credits?page=${page}&limit=30`).then(r => r.json());
-        const list = document.getElementById('credits-list');
-        if (!data.credits || data.credits.length === 0) {
-          list.innerHTML = '<div class="empty-note">No credits found.</div>';
-          return;
-        }
-        list.innerHTML = `
-          <div class="table-row cols-6 header"><div>ID</div><div>Owner</div><div>Accumulation Period</div><div>CO₂ (kg)</div><div>Status</div><div>Action</div></div>
-          ${data.credits.map(c => `
-            <div class="table-row cols-6">
-              <div style="font-family:var(--mono);">#${c.credit_id}</div>
-              <div style="font-family:var(--mono);">${c.owner_email || '—'}</div>
-              <div style="font-family:var(--mono);">${(c.period_start || '').slice(0, 10)} to ${(c.period_end || '').slice(0, 10)}</div>
-              <div>${(c.co2_avoided_kg || 0).toFixed(0)} kg (1 Tonne)</div>
-              <div><span class="badge badge-${c.status}">${c.status}</span></div>
-              <div>
-                ${c.status === 'verified' ? `<button class="btn-sm" onclick="mintCredit(${c.credit_id}, '${c.owner_wallet || ''}')">Mint</button>` : '—'}
-              </div>
-            </div>
-          `).join('')}
-        `;
+        const data = await CTN.get(path);
+
+        list.innerHTML = data.credits.length ? `
+          <div class="table-row cols-7 header">
+            <div>ID</div><div>Owner</div><div>Period</div>
+            <div>CO₂</div><div>Status</div><div>Chain</div><div>Actions</div>
+          </div>
+          ${data.credits.map(creditRow).join('')}`
+          : '<div class="empty-note">No credits match this filter.</div>';
+
         document.getElementById('credits-page-info').textContent = `page ${page} of ${data.pages}`;
         document.getElementById('credits-prev').disabled = page <= 1;
         document.getElementById('credits-next').disabled = page >= data.pages;
-      } catch(e) { console.error(e); }
+      } catch (e) {
+        list.innerHTML = `<div class="empty-note">${esc(e.message)}</div>`;
+      }
     }
 
-    async function mintManualCredit() {
-      const id = document.getElementById('manual-mint-id').value;
-      if (!id) {
-        alert('Please enter a Credit ID to mint.');
-        return;
+    function creditRow(c) {
+      const chainCell = c.on_chain_id
+        ? `<a class="link" href="${esc(settings?.explorer || '')}/tx/${esc(c.tx_hash || '')}"
+              target="_blank" rel="noopener">#${c.on_chain_id} ↗</a>`
+        : '<span style="color:var(--text3);">—</span>';
+
+      const actions = [];
+      if (!c.on_chain_id) {
+        actions.push(`<button class="btn-sm" onclick="mintCredit(${c.credit_id}, '${esc(c.owner_wallet || '')}')">Mint</button>`);
+      } else if (c.status !== 'retired') {
+        actions.push(`<button class="btn-sm" onclick="retireCredit(${c.credit_id})">Retire</button>`);
       }
-      await mintCredit(id, '');
+
+      return `
+        <div class="table-row cols-7">
+          <div style="font-family:var(--mono);">#${c.credit_id}</div>
+          <div>${esc(c.owner_email || '—')}</div>
+          <div style="font-size:10px;">${CTN.fmt.date(c.period_start)} → ${CTN.fmt.date(c.period_end)}</div>
+          <div>${CTN.fmt.number(c.co2_avoided_kg)} kg</div>
+          <div><span class="badge badge-${esc(c.status)}">${esc(c.status)}</span></div>
+          <div>${chainCell}</div>
+          <div>${actions.join(' ') || '<span style="color:var(--text3);">—</span>'}</div>
+        </div>`;
     }
 
-    async function mintCredit(creditId, defaultWallet = '') {
-      const recipient = prompt(`Enter recipient wallet address for Credit #${creditId}:`, defaultWallet);
-      if (recipient === null) return; // User cancelled
-      if (!recipient.trim()) {
-        alert("A recipient wallet address is required to mint.");
+    async function mintCredit(creditId, defaultWallet) {
+      if (settings && !settings.chain_writes_enabled) {
+        alert('On-chain minting is disabled — this server has no signing key configured.');
         return;
       }
 
-      if (!confirm(`Are you sure you want to mint credit #${creditId} to ${recipient}? This will execute an on-chain transaction.`)) return;
+      const recipient = prompt(`Recipient wallet address for credit #${creditId}:`, defaultWallet || '');
+      if (recipient === null) return;
+      if (!/^0x[a-fA-F0-9]{40}$/.test(recipient.trim())) {
+        alert('Enter a valid Ethereum address (0x followed by 40 hex characters).');
+        return;
+      }
+
+      const reason = prompt('Reason for this mint (recorded in the audit log):', 'Verified credit issuance');
+      if (reason === null) return;
+
+      if (!confirm(`Mint credit #${creditId} to ${recipient.trim()}?\n\nThis submits a real on-chain transaction.`)) return;
+
+      await runChainAction(
+        `/mint/${creditId}?recipient=${encodeURIComponent(recipient.trim())}&reason=${encodeURIComponent(reason)}`,
+        result => `Credit #${creditId} minted as on-chain #${result.on_chain_id}.\n\n${result.polygonscan}`
+      );
+    }
+
+    async function retireCredit(creditId) {
+      if (settings && !settings.chain_writes_enabled) {
+        alert('On-chain retirement is disabled — this server has no signing key configured.');
+        return;
+      }
+
+      const reason = prompt('Reason for retirement (recorded in the audit log):', 'Offset claimed by buyer');
+      if (reason === null) return;
+
+      if (!confirm(`Retire credit #${creditId}?\n\nThis is permanent and cannot be undone.`)) return;
+
+      await runChainAction(
+        `/retire/${creditId}?reason=${encodeURIComponent(reason)}`,
+        result => `Credit #${creditId} retired.\n\n${result.polygonscan}`
+      );
+    }
+
+    /** Submit an on-chain action and refresh the affected views. */
+    async function runChainAction(path, describe) {
+      try {
+        const result = await CTN.post(path);
+        alert(describe(result));
+        await Promise.all([loadCredits(creditsPage), loadOverview()]);
+      } catch (e) {
+        alert(e.message || 'The transaction could not be completed.');
+      }
+    }
+
+    // ── Devices & CSV ingestion ──
+
+    function setResult(elementId, message, ok) {
+      const el = document.getElementById(elementId);
+      el.textContent = message;
+      el.className = 'form-result ' + (ok ? 'ok' : 'err');
+    }
+
+    async function registerDevice() {
+      const device_id = document.getElementById('device-id').value.trim();
+      const owner_email = document.getElementById('device-owner').value.trim();
+      const location = document.getElementById('device-location').value.trim() || 'India';
+
+      if (!device_id || !owner_email) {
+        setResult('device-result', 'Device ID and installer email are both required.', false);
+        return;
+      }
 
       try {
-        // Change from /api/admin/mint (which only logged) to /mint which actually hits the blockchain
-        const res = await authFetch(API + `/mint/${creditId}?recipient=${encodeURIComponent(recipient.trim())}`, {
-          method: 'POST'
-        });
-        
-        if (!res.ok) {
-          const err = await res.json();
-          alert('Minting failed: ' + (err.detail || JSON.stringify(err)));
-          return;
-        }
-        alert(`Successfully minted credit #${creditId} to the blockchain!`);
-        loadCredits(creditsPage);
-        loadOverview();
-      } catch(e) {
-        alert('Error minting credit. Please ensure your backend is running and blockchain is accessible.');
-        console.error(e);
+        const result = await CTN.post('/api/admin/devices', { device_id, owner_email, location });
+        setResult('device-result',
+          `Device ${result.device_id} registered to ${result.owner_email}.`, true);
+        document.getElementById('device-id').value = '';
+      } catch (e) {
+        setResult('device-result', e.message, false);
       }
     }
+
+    async function ingestCsv() {
+      const input = document.getElementById('csv-file');
+      if (!input.files.length) {
+        setResult('csv-result', 'Choose a CSV file first.', false);
+        return;
+      }
+
+      const form = new FormData();
+      form.append('file', input.files[0]);
+
+      setResult('csv-result', 'Uploading…', true);
+      try {
+        const result = await CTN.postForm('/api/admin/ingest-csv', form);
+        setResult('csv-result', result.message, true);
+        input.value = '';
+        await loadOverview();
+      } catch (e) {
+        setResult('csv-result', e.message, false);
+      }
+    }
+
+    // ── Transactions ──
+
+    async function loadTransactions(page) {
+      if (page < 1) return;
+      transactionsPage = page;
+
+      const list = document.getElementById('transactions-list');
+      try {
+        const data = await CTN.get(`/api/admin/transactions?page=${page}&limit=20`);
+
+        list.innerHTML = data.transactions.length ? `
+          <div class="table-row cols-txn header">
+            <div>ID</div><div>Buyer</div><div>Credits</div><div>Amount</div><div>Completed</div>
+          </div>
+          ${data.transactions.map(t => `
+            <div class="table-row cols-txn">
+              <div>#${t.id}</div>
+              <div>${esc(t.buyer_email || '—')}</div>
+              <div>${t.quantity}</div>
+              <div>${CTN.fmt.inr(t.total_amount_inr)}</div>
+              <div>${ts(t.completed_at || t.created_at)}</div>
+            </div>`).join('')}`
+          : '<div class="empty-note">No marketplace transactions yet.</div>';
+
+        document.getElementById('transactions-page-info').textContent = `page ${page} of ${data.pages}`;
+        document.getElementById('transactions-prev').disabled = page <= 1;
+        document.getElementById('transactions-next').disabled = page >= data.pages;
+      } catch (e) {
+        list.innerHTML = `<div class="empty-note">${esc(e.message)}</div>`;
+      }
+    }
+
+    // ── Audit log ──
 
     async function loadAudit(page) {
       if (page < 1) return;
       auditPage = page;
+
+      const list = document.getElementById('audit-list');
       try {
-        const data = await authFetch(API + `/api/admin/audit-log?page=${page}&limit=20`).then(r => r.json());
-        const list = document.getElementById('audit-list');
-        if (!data.logs || data.logs.length === 0) {
-          list.innerHTML = '<div class="empty-note">No audit entries yet.</div>';
-          return;
-        }
-        list.innerHTML = `
-          <div class="table-row cols-log header"><div>Timestamp</div><div>Admin</div><div>Action</div><div>Reason</div></div>
-          ${data.logs.map(l => `
-            <div class="table-row cols-log">
-              <div>${ts(l.created_at)}</div>
-              <div>${l.admin_email || '—'}</div>
-              <div>${l.action} ${l.target_type} #${l.target_id}</div>
-              <div style="color:var(--text2);font-size:10px;">${l.reason || '—'}</div>
-            </div>
-          `).join('')}
-        `;
+        const data = await CTN.get(`/api/admin/audit-log?page=${page}&limit=20`);
+
+        list.innerHTML = data.logs.length ? `
+          <div class="table-row cols-log header">
+            <div>Timestamp</div><div>Admin</div><div>Action</div><div>Reason</div>
+          </div>
+          ${data.logs.map(auditRow).join('')}`
+          : '<div class="empty-note">No audit entries yet.</div>';
+
         document.getElementById('audit-page-info').textContent = `page ${page} of ${data.pages}`;
         document.getElementById('audit-prev').disabled = page <= 1;
         document.getElementById('audit-next').disabled = page >= data.pages;
-      } catch(e) { console.error(e); }
+      } catch (e) {
+        list.innerHTML = `<div class="empty-note">${esc(e.message)}</div>`;
+      }
     }
 
+    // ── Health ──
+
     async function loadHealth() {
+      const list = document.getElementById('health-list');
       try {
-        const data = await authFetch(API + '/api/admin/system-health').then(r => r.json());
-        const entries = Object.entries(data).filter(([k]) => k !== 'error');
-        document.getElementById('health-list').innerHTML = entries.map(([k, v]) => {
-          let display = v;
-          if (typeof v === 'boolean') display = v ? '✓ Yes' : '✗ No';
-          if (k === 'status') display = `<span class="badge badge-${v === 'healthy' ? 'healthy' : 'error'}">${v}</span>`;
-          return `<div class="health-row"><div class="health-label">${k.replace(/_/g, ' ')}</div><div class="health-value">${display}</div></div>`;
+        const data = await CTN.get('/api/admin/system-health');
+
+        list.innerHTML = Object.entries(data).map(([key, value]) => {
+          let display;
+          if (key === 'status') {
+            display = `<span class="badge badge-${value === 'healthy' ? 'healthy' : 'error'}">${esc(value)}</span>`;
+          } else if (typeof value === 'boolean') {
+            display = value ? '✓ Yes' : '✗ No';
+          } else {
+            display = esc(value);
+          }
+          return `<div class="health-row">
+            <div class="health-label">${key.replace(/_/g, ' ')}</div>
+            <div class="health-value">${display}</div>
+          </div>`;
         }).join('');
-      } catch(e) {
-        document.getElementById('health-list').innerHTML = '<div class="empty-note" style="color:var(--red);">Failed to check system health.</div>';
+      } catch (e) {
+        list.innerHTML = `<div class="empty-note" style="color:var(--red);">${esc(e.message)}</div>`;
       }
     }
 

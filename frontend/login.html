@@ -204,53 +204,21 @@
     </div>
   </div>
 
+  <script src="/static/ctn.js"></script>
   <script>
-    const API_BASE = 'https://ctn-api-railway-production.up.railway.app';
-    let selectedRole = 'installer';
-
-    // ── Auth-aware fetch wrapper ──
-    function authFetch(url, options = {}) {
-      const token = localStorage.getItem('ctn_token');
-      if (token) {
-        options.headers = options.headers || {};
-        if (typeof options.headers.set === 'function') {
-          options.headers.set('Authorization', 'Bearer ' + token);
-        } else {
-          options.headers['Authorization'] = 'Bearer ' + token;
-        }
-      }
-      options.credentials = 'include';
-      return fetch(url, options);
-    }
-
-    // Pre-fill role from query param
     const params = new URLSearchParams(window.location.search);
-    if (params.get('role') === 'buyer') {
-      selectedRole = 'buyer';
-    }
-    if (params.get('mode') === 'signup') {
-      switchMode('signup');
-    }
+    let selectedRole = params.get('role') === 'buyer' ? 'buyer' : 'installer';
 
-    // Check if already logged in
-    (async function checkAuth() {
-      try {
-        const r = await authFetch(API_BASE + '/api/auth/me');
-        if (r.ok) {
-          const data = await r.json();
-          redirectForRole(data.user.role);
-        }
-      } catch(e) {}
-    })();
-
-    function redirectForRole(role) {
-      const returnTo = params.get('return');
-      if (returnTo) { window.location.href = returnTo; return; }
-      if (role === 'installer') window.location.href = '/app';
-      else if (role === 'buyer') window.location.href = '/marketplace';
-      else if (role === 'admin') window.location.href = '/admin';
+    // ── Messaging ──
+    function showError(msg) {
+      const el = document.getElementById('error-box');
+      el.textContent = msg;
+      el.classList.add('visible');
     }
+    function hideError() { document.getElementById('error-box').classList.remove('visible'); }
+    function hideSuccess() { document.getElementById('success-box').classList.remove('visible'); }
 
+    // ── Mode + role ──
     function switchMode(mode) {
       document.getElementById('login-form').style.display = mode === 'login' ? 'block' : 'none';
       document.getElementById('signup-form').style.display = mode === 'signup' ? 'block' : 'none';
@@ -265,87 +233,63 @@
       document.getElementById('role-buyer').classList.toggle('selected', role === 'buyer');
     }
 
-    function showError(msg) {
-      const el = document.getElementById('error-box');
-      el.textContent = msg; el.classList.add('visible');
-    }
-    function hideError() { document.getElementById('error-box').classList.remove('visible'); }
-    function showSuccess(msg) {
-      const el = document.getElementById('success-box');
-      el.textContent = msg; el.classList.add('visible');
-    }
-    function hideSuccess() { document.getElementById('success-box').classList.remove('visible'); }
-
     function togglePassword(btn, inputId) {
       const input = document.getElementById(inputId);
-      const isPassword = input.type === 'password';
-      input.type = isPassword ? 'text' : 'password';
-      btn.classList.toggle('active', isPassword);
-      btn.setAttribute('aria-label', isPassword ? 'Hide password' : 'Show password');
+      const revealing = input.type === 'password';
+      input.type = revealing ? 'text' : 'password';
+      btn.classList.toggle('active', revealing);
+      btn.setAttribute('aria-label', revealing ? 'Hide password' : 'Show password');
     }
 
-    async function handleLogin(e) {
-      e.preventDefault(); hideError(); hideSuccess();
-      const btn = document.getElementById('login-btn');
-      btn.disabled = true; btn.textContent = 'Signing in...';
+    function redirectForRole(role) {
+      const returnTo = params.get('return');
+      window.location.href = returnTo || CTN.homeFor(role);
+    }
+
+    // ── Submission ──
+
+    /** Run a credential request with the submit button locked for its duration. */
+    async function submitCredentials(buttonId, idleLabel, busyLabel, send) {
+      const btn = document.getElementById(buttonId);
+      hideError(); hideSuccess();
+      btn.disabled = true;
+      btn.textContent = busyLabel;
       try {
-        const r = await authFetch(API_BASE + '/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: document.getElementById('login-email').value,
-            password: document.getElementById('login-password').value
-          })
-        });
-        const data = await r.json();
-        if (!r.ok) { showError(data.detail || 'Login failed'); return; }
-        // Store token for cross-origin auth
-        if (data.token) localStorage.setItem('ctn_token', data.token);
+        const data = await send();
+        CTN.setToken(data.token);
         redirectForRole(data.user.role);
-      } catch(e) {
-        showError('Network error — please try again.');
-      } finally {
-        btn.disabled = false; btn.textContent = 'Sign in →';
+      } catch (e) {
+        showError(e instanceof CTN.ApiError ? e.message : 'Network error — please try again.');
+        btn.disabled = false;
+        btn.textContent = idleLabel;
       }
     }
 
-    async function handleSignup(e) {
-      e.preventDefault(); hideError(); hideSuccess();
-      const btn = document.getElementById('signup-btn');
-      btn.disabled = true; btn.textContent = 'Creating account...';
-      try {
-        const r = await authFetch(API_BASE + '/api/auth/signup', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: document.getElementById('signup-email').value,
-            password: document.getElementById('signup-password').value,
-            role: selectedRole
-          })
-        });
-        const data = await r.json();
-        if (!r.ok) {
-          const detail = data.detail;
-          if (typeof detail === 'object' && Array.isArray(detail)) {
-            showError(detail.map(d => d.msg).join('. '));
-          } else {
-            showError(detail || 'Signup failed');
-          }
-          return;
-        }
-        // Store token for cross-origin auth
-        if (data.token) localStorage.setItem('ctn_token', data.token);
-        redirectForRole(data.user.role);
-      } catch(e) {
-        showError('Network error — please try again.');
-      } finally {
-        btn.disabled = false; btn.textContent = 'Create account →';
-      }
+    function handleLogin(event) {
+      event.preventDefault();
+      return submitCredentials('login-btn', 'Sign in \u2192', 'Signing in...', () =>
+        CTN.post('/api/auth/login', {
+          email: document.getElementById('login-email').value,
+          password: document.getElementById('login-password').value,
+        }));
     }
 
-    // Apply initial role from URL
-    if (params.get('role')) selectRole(params.get('role'));
+    function handleSignup(event) {
+      event.preventDefault();
+      return submitCredentials('signup-btn', 'Create account \u2192', 'Creating account...', () =>
+        CTN.post('/api/auth/signup', {
+          email: document.getElementById('signup-email').value,
+          password: document.getElementById('signup-password').value,
+          role: selectedRole,
+        }));
+    }
+
+    // ── Init ──
+    selectRole(selectedRole);
     if (params.get('mode') === 'signup') switchMode('signup');
+
+    // Send an already-authenticated visitor straight to their dashboard.
+    CTN.currentUser().then(user => { if (user) redirectForRole(user.role); });
   </script>
 </body>
 </html>

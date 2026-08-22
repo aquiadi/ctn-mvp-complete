@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# One in-flight run per branch; a newer push cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend — tests & lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint (pyflakes)
+        run: pyflakes config.py main.py auth.py chain.py database.py data_utils.py ipfs_utils.py rate_limit.py routes tests
+
+      - name: Run tests
+        run: python -m pytest -q
+
+  frontend:
+    name: Frontend — syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check inline page scripts and shared modules parse
+        run: |
+          node --check frontend/static/ctn.js
+          node --check frontend/static/wallet.js
+          node - <<'NODE'
+          const fs = require('fs');
+          const vm = require('vm');
+          const files = fs.readdirSync('frontend').filter(f => f.endsWith('.html'));
+          let failed = false;
+          for (const file of files) {
+            const html = fs.readFileSync(`frontend/${file}`, 'utf8');
+            const blocks = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)];
+            blocks.forEach((match, i) => {
+              const code = match[1].trim();
+              if (!code) return;
+              try {
+                new vm.Script(code, { filename: `${file}#${i}` });
+                console.log(`ok   ${file} block#${i}`);
+              } catch (e) {
+                console.error(`FAIL ${file} block#${i}: ${e.message}`);
+                failed = true;
+              }
+            });
+          }
+          process.exit(failed ? 1 : 0);
+          NODE

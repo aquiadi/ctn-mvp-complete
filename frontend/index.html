@@ -899,7 +899,7 @@
         <div class="process-step">
           <div class="process-num">03</div>
           <div class="process-title">Trade</div>
-          <div class="process-desc">Installers list verified credits on the marketplace at ₹415/credit. Buyers purchase to offset emissions — ownership transfers on-chain.</div>
+          <div class="process-desc">Installers list verified credits on the marketplace at <span data-price-inr>—</span>/credit. Buyers purchase to offset emissions — ownership transfers on-chain.</div>
         </div>
       </div>
     </section>
@@ -918,15 +918,15 @@
           <div class="audience-details">
             <div class="audience-detail-row">
               <span class="audience-detail-label">Sell threshold</span>
-              <span class="audience-detail-value">10 verified credits</span>
+              <span class="audience-detail-value" data-sell-threshold>—</span>
             </div>
             <div class="audience-detail-row">
               <span class="audience-detail-label">Credit value</span>
-              <span class="audience-detail-value">₹415 each ($5 USD)</span>
+              <span class="audience-detail-value"><span data-price-inr>—</span> each (<span data-price-usd>—</span> USD)</span>
             </div>
             <div class="audience-detail-row">
               <span class="audience-detail-label">Wallet</span>
-              <span class="audience-detail-value">Custodial (no MetaMask needed)</span>
+              <span class="audience-detail-value">Link any EIP-1193 wallet to sell</span>
             </div>
             <div class="audience-detail-row">
               <span class="audience-detail-label">Data source</span>
@@ -943,7 +943,7 @@
           <div class="audience-details">
             <div class="audience-detail-row">
               <span class="audience-detail-label">Price</span>
-              <span class="audience-detail-value">₹415 per credit</span>
+              <span class="audience-detail-value"><span data-price-inr>—</span> per credit</span>
             </div>
             <div class="audience-detail-row">
               <span class="audience-detail-label">Backing</span>
@@ -1052,151 +1052,136 @@
     </footer>
   </div>
 
+  <script src="/static/ctn.js"></script>
   <script>
-    // ═══════════════════════════════════════════════
-    // CONFIG — change this to your Railway backend URL
-    // ═══════════════════════════════════════════════
-    const API_BASE = 'https://ctn-api-railway-production.up.railway.app';
-    // ═══════════════════════════════════════════════
-
-    // ── Auth-aware fetch wrapper ──
-    function authFetch(url, options = {}) {
-      const token = localStorage.getItem('ctn_token');
-      if (token) {
-        options.headers = options.headers || {};
-        if (typeof options.headers.set === 'function') {
-          options.headers.set('Authorization', 'Bearer ' + token);
-        } else {
-          options.headers['Authorization'] = 'Bearer ' + token;
-        }
-      }
-      options.credentials = 'include';
-      return fetch(url, options);
-    }
-
-    async function api(path, options = {}) {
-      const r = await fetch(API_BASE + path, options);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r.json();
-    }
-
-    // Handle post-logout redirect: if logged_out=1, verify session is cleared
-    if (new URLSearchParams(window.location.search).has('logged_out')) {
-      (async function() {
-        try {
-          const r = await authFetch(API_BASE + '/api/auth/me');
-          if (r.ok) {
-            // Session still valid? Force logout again
-            await authFetch(API_BASE + '/api/auth/logout', { method: 'POST' });
-          }
-        } catch (e) {}
-        localStorage.removeItem('ctn_token');
-        // Clean URL
-        window.history.replaceState({}, '', '/');
-      })();
-    }
-
-    let creditsCurPage = 1;
+    const esc = CTN.fmt.escape;
     const CREDITS_PAGE_SIZE = 8;
-    let creditsTotalCount = 0;
+
+    const state = { page: 1, pages: 1, total: 0 };
+
+    function setBadge(text, background, color) {
+      const badge = document.getElementById('live-badge');
+      badge.textContent = text;
+      badge.style.background = background;
+      badge.style.color = color;
+    }
+
+    // ── Init ──
 
     async function init() {
       try {
-        const [stats, creditsData] = await Promise.all([
-          api('/stats'),
-          api('/credits?page=1&limit=' + CREDITS_PAGE_SIZE)
+        const [stats, credits] = await Promise.all([
+          CTN.get('/stats'),
+          CTN.get(`/credits?page=1&limit=${CREDITS_PAGE_SIZE}`),
         ]);
 
         populateStats(stats);
         populateProof(stats);
-        populateCredits(creditsData);
-
-        document.getElementById('live-badge').textContent = 'live';
-        document.getElementById('live-badge').style.background = 'var(--green-light)';
-        document.getElementById('live-badge').style.color = 'var(--green)';
-
+        populateCredits(credits);
+        setBadge('live', 'var(--green-light)', 'var(--green)');
       } catch (e) {
-        console.error('API error:', e);
-        document.getElementById('live-badge').textContent = 'demo data';
-        document.getElementById('live-badge').style.background = 'var(--amber-light)';
-        document.getElementById('live-badge').style.color = 'var(--amber)';
-        loadDemoData();
+        console.error('API unavailable:', e);
+        showUnavailable(e);
       }
     }
 
+    /**
+     * Every figure on this page is a claim about real generation and real
+     * on-chain records, so an unreachable API is reported as such. Showing
+     * placeholder numbers here would misrepresent unverified data as measured.
+     */
+    function showUnavailable(error) {
+      setBadge('offline', 'var(--amber-light)', 'var(--amber)');
+
+      ['stat-kwh', 'stat-co2', 'stat-credits', 'stat-inr',
+       'hero-credits-count', 'hero-days'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = '—';
+      });
+
+      ['proof-ipfs', 'proof-device', 'proof-period'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = 'Unavailable';
+      });
+
+      document.getElementById('credits-list').innerHTML = `
+        <div style="padding:1.5rem 1.15rem;text-align:center;font-size:11px;color:var(--text3);">
+          Live data is temporarily unavailable.<br>
+          <span style="opacity:0.7;">${esc(error.message || '')}</span>
+        </div>`;
+      document.getElementById('credits-total').textContent = '—';
+      document.getElementById('credits-page-info').textContent = '';
+      document.getElementById('credits-prev').disabled = true;
+      document.getElementById('credits-next').disabled = true;
+    }
+
+    // ── Render ──
+
     function populateStats(stats) {
-      document.getElementById('stat-kwh').textContent = (stats.total_kwh || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
-      document.getElementById('stat-co2').textContent = (stats.total_co2_kg || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
-      document.getElementById('stat-credits').textContent = (stats.total_credits || 0).toLocaleString('en-IN');
-      document.getElementById('stat-inr').textContent = '₹' + (stats.value_inr || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
-
-      document.getElementById('hero-credits-count').textContent = (stats.total_credits || 0).toLocaleString('en-IN');
-
-      if (stats.period_start && stats.period_end) {
-        const start = new Date(stats.period_start);
-        const end = new Date(stats.period_end);
-        const days = Math.round((end - start) / (1000 * 60 * 60 * 24));
-        document.getElementById('hero-days').textContent = days;
-      } else {
-        document.getElementById('hero-days').textContent = '34';
-      }
+      document.getElementById('stat-kwh').textContent = CTN.fmt.number(stats.total_kwh);
+      document.getElementById('stat-co2').textContent = CTN.fmt.number(stats.total_co2_kg);
+      document.getElementById('stat-credits').textContent = CTN.fmt.number(stats.total_credits);
+      document.getElementById('stat-inr').textContent = CTN.fmt.inr(stats.value_inr);
+      document.getElementById('hero-credits-count').textContent = CTN.fmt.number(stats.total_credits);
+      document.getElementById('hero-days').textContent = CTN.fmt.number(stats.period_days);
     }
 
     function populateProof(stats) {
-      document.getElementById('proof-ipfs').innerHTML =
-        `<a href="${stats.ipfs_master || '#'}" target="_blank" rel="noopener">${(stats.ipfs_master || '').replace('https://', '').slice(0, 36)}… ↗</a>`;
+      const ipfs = stats.ipfs_master || '';
+      document.getElementById('proof-ipfs').innerHTML = ipfs
+        ? `<a href="${esc(ipfs)}" target="_blank" rel="noopener">${esc(ipfs.replace('https://', '').slice(0, 36))}… ↗</a>`
+        : '—';
       document.getElementById('proof-device').textContent = stats.device_id || '—';
       document.getElementById('proof-period').textContent =
-        (stats.period_start || '').slice(0, 16) + ' → ' + (stats.period_end || '').slice(0, 16);
+        `${(stats.period_start || '').slice(0, 16)} → ${(stats.period_end || '').slice(0, 16)}`;
     }
 
     function populateCredits(data) {
-      creditsTotalCount = data.total || 0;
-      const list = document.getElementById('credits-list');
-      const totalPages = data.pages || Math.ceil(creditsTotalCount / CREDITS_PAGE_SIZE);
+      state.total = data.total || 0;
+      state.pages = data.pages || 1;
 
       document.getElementById('credits-total').textContent =
-        creditsTotalCount.toLocaleString('en-IN') + ' total';
+        `${CTN.fmt.number(state.total)} total`;
       document.getElementById('credits-page-info').textContent =
-        `page ${creditsCurPage} of ${totalPages}`;
-      document.getElementById('credits-prev').disabled = creditsCurPage <= 1;
-      document.getElementById('credits-next').disabled = creditsCurPage >= totalPages;
+        `page ${state.page} of ${state.pages}`;
+      document.getElementById('credits-prev').disabled = state.page <= 1;
+      document.getElementById('credits-next').disabled = state.page >= state.pages;
 
-      if (!data.credits || data.credits.length === 0) {
-        list.innerHTML = '<div style="padding:1.5rem 1.15rem;text-align:center;font-size:11px;color:var(--text3);">No credits found.</div>';
-        return;
-      }
-
-      list.innerHTML = data.credits.map(c => `
+      const list = document.getElementById('credits-list');
+      list.innerHTML = data.credits.length ? data.credits.map(c => `
         <div class="credit-row" onclick="pickCredit(${c.credit_id})" title="Click to verify #${c.credit_id}">
           <div class="credit-row-left">
             <span class="credit-row-id">#${c.credit_id}</span>
-            <span class="credit-row-date">${(c.period_start || '').slice(0, 10)} to ${(c.period_end || '').slice(0, 10)}</span>
+            <span class="credit-row-date">${CTN.fmt.date(c.period_start)} to ${CTN.fmt.date(c.period_end)}</span>
           </div>
-          <span class="credit-row-kwh">${(c.co2_avoided_kg || 0).toFixed(0)} kg CO₂</span>
-        </div>
-      `).join('');
+          <span class="credit-row-kwh">
+            ${CTN.fmt.number(c.co2_avoided_kg)} kg CO₂${c.on_chain_id ? ' · ⛓' : ''}
+          </span>
+        </div>`).join('')
+        : '<div style="padding:1.5rem 1.15rem;text-align:center;font-size:11px;color:var(--text3);">No credits issued yet.</div>';
     }
 
-    async function creditsPage(dir) {
-      const totalPages = Math.ceil(creditsTotalCount / CREDITS_PAGE_SIZE);
-      const next = creditsCurPage + dir;
-      if (next < 1 || next > totalPages) return;
-      creditsCurPage = next;
+    async function creditsPage(direction) {
+      const next = state.page + direction;
+      if (next < 1 || next > state.pages) return;
+
       try {
-        const data = await api(`/credits?page=${creditsCurPage}&limit=${CREDITS_PAGE_SIZE}`);
+        const data = await CTN.get(`/credits?page=${next}&limit=${CREDITS_PAGE_SIZE}`);
+        state.page = next;
         populateCredits(data);
-      } catch (e) { console.error(e); }
+      } catch (e) {
+        console.error('Could not load credits page:', e);
+      }
     }
+
+    // ── Verification ──
 
     function pickCredit(id) {
       const input = document.getElementById('verify-id');
       input.value = id;
-      // Scroll to verify section
       input.scrollIntoView({ behavior: 'smooth', block: 'center' });
       input.focus();
-      // Auto-trigger verify
-      setTimeout(() => verifyCredit(), 300);
+      verifyCredit();
     }
 
     async function verifyCredit() {
@@ -1204,79 +1189,99 @@
       if (!creditId) return;
 
       const box = document.getElementById('verify-result');
-      box.classList.remove('visible');
       box.textContent = 'Checking blockchain…';
       box.classList.add('visible');
 
       try {
-        const data = await api(`/verify/${creditId}`);
-
-        if (data.on_chain) {
-          box.innerHTML = `
-          <div style="font-weight:500;margin-bottom:8px;font-size:13px;">✓ Credit #${creditId} is verified on-chain</div>
-          <div style="margin-bottom:4px;">Energy: ${data.energy_kwh} kWh · CO₂: ${data.co2_avoided_kg} kg</div>
-          <div style="margin-bottom:4px;">Holder: ${(data.holder || '').slice(0, 10)}…${(data.holder || '').slice(-4)}</div>
-          <div style="margin-bottom:4px;">Retired: ${data.retired ? 'Yes' : 'No'}</div>
-          <div style="margin-bottom:4px;"><a href="${data.verify_ipfs}" target="_blank" rel="noopener" style="color:var(--blue);">View on IPFS ↗</a>
-           · <a href="${data.polygonscan}" target="_blank" rel="noopener" style="color:var(--blue);">Polygonscan ↗</a></div>
-        `;
-        } else {
-          box.innerHTML = `
-          <div style="font-weight:500;margin-bottom:8px;font-size:13px;">✓ Credit #${creditId} found in IPFS dataset</div>
-          <div style="margin-bottom:4px;">Energy: ${data.energy_kwh} kWh · CO₂: ${data.co2_avoided_kg} kg</div>
-          <div style="margin-bottom:4px;color:var(--text3);font-size:11px;">Not yet minted on blockchain</div>
-          <div><a href="${data.ipfs_master}" target="_blank" rel="noopener" style="color:var(--blue);">View IPFS source ↗</a></div>
-        `;
-        }
+        const data = await CTN.get(`/verify/${encodeURIComponent(creditId)}`);
+        box.innerHTML = data.on_chain ? onChainResult(creditId, data) : offChainResult(creditId, data);
       } catch (e) {
-        box.textContent = 'Verification failed: ' + e.message;
+        box.textContent = e.message || 'Verification failed.';
       }
     }
 
-    function loadDemoData() {
-      const demo = {
-        total_kwh: 106140.58,
-        total_co2_kg: 87035.28,
-        total_credits: 1684,
-        value_inr: 697060,
-        device_id: '1BY6WEcLGh8j5v7',
-        period_start: '2020-05-15 00:00:00',
-        period_end: '2020-06-17 23:59:59',
-        ipfs_master: 'https://ivory-geographical-lungfish-400.mypinata.cloud/ipfs/bafybeifpn7y2r2rsjtvm4hun3dy63jkp5ah7qxfwhk5u6bemkapmis2qku',
-      };
-      populateStats(demo);
-      populateProof(demo);
+    function onChainResult(creditId, data) {
+      const links = [];
+      if (data.verify_ipfs) links.push(link(data.verify_ipfs, 'View certificate on IPFS'));
+      if (data.polygonscan) links.push(link(data.polygonscan, 'Polygonscan'));
 
-      // Demo credits for offline
-      const demoCredits = Array.from({ length: 8 }, (_, i) => ({
-        credit_id: i + 1,
-        total_kwh: 58.65 + (Math.random() * 50),
-        period_end: '2020-05-' + String(15 + i).padStart(2, '0') + ' 12:00:00'
-      }));
-      populateCredits({ credits: demoCredits, total: 1684, pages: 211 });
+      return `
+        <div style="font-weight:500;margin-bottom:8px;font-size:13px;">
+          ✓ Credit #${esc(creditId)} is verified on-chain (record #${data.on_chain_id})
+        </div>
+        <div style="margin-bottom:4px;">Energy: ${data.energy_kwh} kWh · CO₂: ${data.co2_avoided_kg} kg</div>
+        <div style="margin-bottom:4px;">Holder: ${esc((data.holder || '').slice(0, 10))}…${esc((data.holder || '').slice(-4))}</div>
+        <div style="margin-bottom:4px;">Retired: ${data.retired ? 'Yes' : 'No'}</div>
+        <div style="margin-bottom:4px;">
+          Ledger match: ${data.values_match
+            ? '<span style="color:var(--green);">values agree</span>'
+            : '<span style="color:var(--amber);">values differ from the database record</span>'}
+        </div>
+        <div>${links.join(' · ')}</div>`;
+    }
+
+    function offChainResult(creditId, data) {
+      const links = [];
+      if (data.certificate_ipfs) links.push(link(data.certificate_ipfs, 'View certificate on IPFS'));
+      if (data.ipfs_master) links.push(link(data.ipfs_master, 'View source dataset'));
+
+      return `
+        <div style="font-weight:500;margin-bottom:8px;font-size:13px;">
+          ✓ Credit #${esc(creditId)} is issued and certified
+        </div>
+        <div style="margin-bottom:4px;">Energy: ${data.energy_kwh} kWh · CO₂: ${data.co2_avoided_kg} kg</div>
+        <div style="margin-bottom:4px;">Device: ${esc(data.device_id)} · ${esc(data.period)}</div>
+        <div style="margin-bottom:4px;color:var(--text3);font-size:11px;">
+          ${esc(data.chain_error || data.detail || 'Not yet minted on the blockchain.')}
+        </div>
+        <div>${links.join(' · ')}</div>`;
+    }
+
+    function link(href, label) {
+      return `<a href="${esc(href)}" target="_blank" rel="noopener" style="color:var(--blue);">${label} ↗</a>`;
+    }
+
+    // ── Post-logout cleanup ──
+
+    if (new URLSearchParams(window.location.search).has('logged_out')) {
+      CTN.setToken(null);
+      CTN.post('/api/auth/logout').catch(() => {});
+      window.history.replaceState({}, '', '/');
     }
 
     init();
 
-    // ── Scroll-spy: highlight active section in nav ──
-    const sectionIds = ['stats', 'how', 'join', 'verify'];
-    const sectionEls = sectionIds.map(id => document.getElementById(id));
-    const navLinks = document.querySelectorAll('.nav-section-link');
+    // ── Server-published pricing ──
+    //
+    // Prices and thresholds are owned by the backend; the markup above only
+    // reserves a slot for them.
 
-    const observer = new IntersectionObserver((entries) => {
+    CTN.settings().then(settings => {
+      const fill = (selector, value) =>
+        document.querySelectorAll(selector).forEach(el => { el.textContent = value; });
+
+      fill('[data-price-inr]', CTN.fmt.inr(settings.price_per_credit_inr));
+      fill('[data-price-usd]', CTN.fmt.usd(settings.price_per_credit_usd));
+      var threshold = settings.sell_threshold;
+      fill('[data-sell-threshold]',
+        CTN.fmt.number(threshold) + ' verified credit' + (threshold === 1 ? '' : 's'));
+    }).catch(e => console.error('Could not load settings:', e));
+
+    // ── Scroll-spy ──
+
+    const observer = new IntersectionObserver(entries => {
       entries.forEach(entry => {
-        const id = entry.target.id;
-        const link = document.querySelector(`.nav-section-link[href="#${id}"]`);
-        if (link) {
-          if (entry.isIntersecting) {
-            navLinks.forEach(l => l.classList.remove('active'));
-            link.classList.add('active');
-          }
-        }
+        if (!entry.isIntersecting) return;
+        const link = document.querySelector(`.nav-section-link[href="#${entry.target.id}"]`);
+        if (!link) return;
+        document.querySelectorAll('.nav-section-link').forEach(l => l.classList.remove('active'));
+        link.classList.add('active');
       });
     }, { rootMargin: '-30% 0px -60% 0px' });
 
-    sectionEls.forEach(el => { if (el) observer.observe(el); });
+    ['stats', 'how', 'join', 'verify']
+      .map(id => document.getElementById(id))
+      .forEach(el => { if (el) observer.observe(el); });
   </script>
 </body>
 

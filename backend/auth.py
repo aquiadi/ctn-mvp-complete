@@ -1,96 +1,125 @@
 """
-CTN Auth — JWT (httpOnly cookies), password hashing, role dependencies, wallet verification.
+CTN Auth — JWT sessions, password hashing, role dependencies, wallet verification.
+
+Sessions are carried in an httpOnly cookie. When the frontend is served from a
+different origin than the API, browsers that block third-party cookies drop it,
+so an `Authorization: Bearer` header is accepted as a fallback.
 """
 
 import os
-import time
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
+from eth_account.messages import encode_defunct
 from fastapi import Depends, HTTPException, Request, Response, status
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from web3 import Web3
-from eth_account.messages import encode_defunct
 
-from database import database, pwd_context, db_execute_with_retry
+import config
+from database import database, pwd_context
 
-# ── Config ─────────────────────────────────────────────────────────────────
+# ── Signing key ────────────────────────────────────────────────────────────
 
-SECRET_KEY = os.getenv("JWT_SECRET", "REDACTED-ROTATED-SECRET")
-ALGORITHM = "HS256"
-TOKEN_EXPIRE_DAYS = 7
-COOKIE_NAME = "ctn_session"
-COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"  # Must be True for SameSite=None
-COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN", None)  # e.g. ".ctn.org" in production
+_DEV_SECRET_FILE = Path(__file__).parent / ".ctn-dev-secret"
+
+
+def _resolve_secret() -> str:
+    """
+    Use the configured secret when present. Outside production, fall back to a
+    locally generated key persisted next to the source so restarts don't log
+    developers out — deliberately not a constant baked into the repository.
+    """
+    if config.JWT_SECRET:
+        return config.JWT_SECRET
+
+    if config.IS_PRODUCTION:
+        raise config.ConfigError("JWT_SECRET must be set in production.")
+
+    if _DEV_SECRET_FILE.exists():
+        return _DEV_SECRET_FILE.read_text().strip()
+
+    generated = secrets.token_urlsafe(48)
+    _DEV_SECRET_FILE.write_text(generated)
+    os.chmod(_DEV_SECRET_FILE, 0o600)
+    return generated
+
+
+SECRET_KEY = _resolve_secret()
 
 
 # ── JWT helpers ────────────────────────────────────────────────────────────
 
 def create_access_token(user_id: int, email: str, role: str) -> str:
-    """Create a JWT token with user claims."""
-    expire = datetime.now(timezone.utc) + timedelta(days=TOKEN_EXPIRE_DAYS)
+    """Issue a signed session token for the given user."""
+    now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
         "email": email,
         "role": role,
-        "exp": expire,
-        "iat": datetime.now(timezone.utc),
+        "exp": now + timedelta(days=config.TOKEN_EXPIRE_DAYS),
+        "iat": now,
     }
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode(payload, SECRET_KEY, algorithm=config.JWT_ALGORITHM)
 
 
 def decode_token(token: str) -> dict:
-    """Decode and validate a JWT token. Raises JWTError on failure."""
-    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    """Decode and validate a session token. Raises JWTError on failure."""
+    return jwt.decode(token, SECRET_KEY, algorithms=[config.JWT_ALGORITHM])
 
 
 def set_auth_cookie(response: Response, token: str):
-    """Set the JWT as an httpOnly secure cookie."""
+    """Attach the session token as an httpOnly cookie."""
     response.set_cookie(
-        key=COOKIE_NAME,
+        key=config.COOKIE_NAME,
         value=token,
         httponly=True,
-        secure=COOKIE_SECURE,
-        samesite="none",
-        max_age=TOKEN_EXPIRE_DAYS * 24 * 3600,
+        secure=config.COOKIE_SECURE,
+        samesite=config.COOKIE_SAMESITE,
+        max_age=config.TOKEN_EXPIRE_DAYS * 24 * 3600,
         path="/",
-        domain=COOKIE_DOMAIN,
+        domain=config.COOKIE_DOMAIN,
     )
 
 
 def clear_auth_cookie(response: Response):
-    """Remove the auth cookie."""
+    """
+    Remove the session cookie. The attributes must match those used when it was
+    set, or the browser treats it as a different cookie and leaves it in place.
+    """
     response.delete_cookie(
-        key=COOKIE_NAME,
+        key=config.COOKIE_NAME,
         path="/",
-        domain=COOKIE_DOMAIN,
-        secure=COOKIE_SECURE,
+        domain=config.COOKIE_DOMAIN,
+        secure=config.COOKIE_SECURE,
         httponly=True,
-        samesite="none",
+        samesite=config.COOKIE_SAMESITE,
     )
 
 
 # ── FastAPI dependencies ───────────────────────────────────────────────────
 
+def _extract_token(request: Request) -> Optional[str]:
+    token = request.cookies.get(config.COOKIE_NAME)
+    if token:
+        return token
+
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        return auth_header[7:].strip() or None
+
+    return None
+
+
 async def get_current_user(request: Request) -> dict:
-    """
-    Extract and validate the JWT from the ctn_session httpOnly cookie,
-    or from the Authorization: Bearer <token> header as a fallback.
-    Returns the user record from the database.
-    """
-    token = request.cookies.get(COOKIE_NAME)
-    if not token:
-        # Fallback: check Authorization header (for cross-origin deployments
-        # where third-party cookies are blocked by the browser)
-        auth_header = request.headers.get("authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
+    """Resolve the caller's user record from their session, or raise 401."""
+    token = _extract_token(request)
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated — no session cookie or token found"
+            detail="Not authenticated — no session cookie or token found",
         )
 
     try:
@@ -98,65 +127,52 @@ async def get_current_user(request: Request) -> dict:
     except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session expired or invalid — please log in again"
+            detail="Session expired or invalid — please log in again",
         )
 
-    user_id = payload.get("sub")
-    if not user_id:
+    try:
+        user_id = int(payload.get("sub", ""))
+    except (TypeError, ValueError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid session token"
+            detail="Invalid session token",
         )
 
     user = await database.fetch_one(
         query="SELECT id, email, role, wallet_address, created_at FROM users WHERE id = :id",
-        values={"id": int(user_id)}
+        values={"id": user_id},
     )
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User no longer exists"
+            detail="User no longer exists",
         )
 
     return dict(user)
 
 
 async def get_optional_user(request: Request) -> Optional[dict]:
-    """Like get_current_user, but returns None instead of raising if not authenticated."""
+    """Like get_current_user, but returns None instead of raising."""
     try:
         return await get_current_user(request)
     except HTTPException:
         return None
 
 
-async def require_installer(user: dict = Depends(get_current_user)) -> dict:
-    """Require the current user to have the 'installer' role."""
-    if user["role"] != "installer":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This action requires an installer account"
-        )
-    return user
+def _require_role(role: str, message: str):
+    """Build a dependency that admits only users holding the given role."""
+
+    async def dependency(user: dict = Depends(get_current_user)) -> dict:
+        if user["role"] != role:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=message)
+        return user
+
+    return dependency
 
 
-async def require_buyer(user: dict = Depends(get_current_user)) -> dict:
-    """Require the current user to have the 'buyer' role."""
-    if user["role"] != "buyer":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This action requires a buyer account"
-        )
-    return user
-
-
-async def require_admin(user: dict = Depends(get_current_user)) -> dict:
-    """Require the current user to have the 'admin' role."""
-    if user["role"] != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This action requires admin access"
-        )
-    return user
+require_installer = _require_role("installer", "This action requires an installer account")
+require_buyer = _require_role("buyer", "This action requires a buyer account")
+require_admin = _require_role("admin", "This action requires admin access")
 
 
 # ── Password helpers ───────────────────────────────────────────────────────
@@ -172,20 +188,18 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 # ── Wallet signature verification ─────────────────────────────────────────
 
 def generate_nonce() -> str:
-    """Generate a random nonce for wallet signature challenge."""
+    """Produce a single-use challenge for a wallet-ownership proof."""
     return f"CTN-AUTH-{secrets.token_hex(16)}-{int(time.time())}"
 
 
 def verify_wallet_signature(wallet_address: str, nonce: str, signature: str) -> bool:
     """
-    Verify that the given signature was produced by the private key
-    controlling wallet_address, signing the given nonce message.
-    Uses EIP-191 personal_sign standard.
+    Confirm the signature over `nonce` was produced by the key controlling
+    `wallet_address`, using the EIP-191 personal_sign format.
     """
     try:
-        w3 = Web3()
         message = encode_defunct(text=nonce)
-        recovered_address = w3.eth.account.recover_message(message, signature=signature)
-        return recovered_address.lower() == wallet_address.lower()
+        recovered = Web3().eth.account.recover_message(message, signature=signature)
+        return recovered.lower() == wallet_address.lower()
     except Exception:
         return False

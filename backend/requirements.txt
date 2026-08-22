@@ -1,13 +1,25 @@
-fastapi
-uvicorn
-requests
-web3
-python-dotenv
-aiosqlite
-databases[sqlite]
-python-jose[cryptography]
-passlib[bcrypt]
-slowapi
-eth-account
-bcrypt<4.0.0
+# Runtime dependencies, pinned to the versions the test suite runs against.
+
+# ── Web framework ──
+fastapi==0.141.1
+uvicorn==0.52.4
 python-multipart==0.0.32
+pydantic==2.13.4
+
+# ── Database ──
+databases==0.9.0
+aiosqlite==0.22.1
+
+# ── Auth ──
+python-jose[cryptography]==3.5.0
+passlib[bcrypt]==1.7.4
+bcrypt==3.2.2          # passlib 1.7.x is incompatible with bcrypt >= 4
+slowapi==0.1.10
+
+# ── Blockchain & IPFS ──
+web3==7.16.0
+eth-account==0.13.7
+requests==2.34.2
+
+# ── Config ──
+python-dotenv==1.2.3

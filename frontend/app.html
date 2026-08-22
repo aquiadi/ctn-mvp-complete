@@ -143,6 +143,8 @@
       .nav-links { display: none; }
       .stats-grid { grid-template-columns: 1fr 1fr; }
     }
+    .sig-chip { margin-left: 8px; font-size: 10px; color: var(--green); background: var(--green-light); padding: 2px 6px; border-radius: 4px; }
+    .list-empty { font-size: 12px; color: var(--text3); padding: 1rem 0; }
   </style>
 </head>
 <body>
@@ -190,101 +192,76 @@
 
   <footer>CTN · Climate Trust Network · Simulated data from Patna, Bihar, India</footer>
 
+  <script src="/static/ctn.js"></script>
+  <script src="/static/wallet.js"></script>
   <script>
-    const API = 'https://ctn-api-railway-production.up.railway.app';
-    let dashboardData = null;
-    let creditsData = null;
-    let readingsData = null;
-    let currentCreditsPage = 1;
-    let currentReadingsPage = 1;
     const PAGE_SIZE = 10;
+    const esc = CTN.fmt.escape;
 
-    // ── Auth-aware fetch wrapper ──
-    function authFetch(url, options = {}) {
-      const token = localStorage.getItem('ctn_token');
-      if (token) {
-        options.headers = options.headers || {};
-        if (typeof options.headers.set === 'function') {
-          options.headers.set('Authorization', 'Bearer ' + token);
-        } else {
-          options.headers['Authorization'] = 'Bearer ' + token;
-        }
-      }
-      options.credentials = 'include';
-      return fetch(url, options);
-    }
+    const state = {
+      user: null,
+      settings: null,
+      dashboard: null,
+      credits: { data: null, page: 1 },
+      readings: { data: null, page: 1 },
+    };
 
-    // ── Auth check ──
-    async function checkAuth() {
-      try {
-        const r = await authFetch(API + '/api/auth/me');
-        if (!r.ok) throw new Error('Not auth');
-        const data = await r.json();
-        if (data.user.role !== 'installer') {
-          window.location.href = '/login';
-          return null;
-        }
-        return data.user;
-      } catch(e) {
-        window.location.href = '/login?return=/app';
-        return null;
-      }
-    }
-
-    async function logout() {
-      try {
-        await authFetch(API + '/api/auth/logout', { method: 'POST' });
-      } catch (e) {
-        console.warn('Logout API call failed:', e);
-      }
-      localStorage.removeItem('ctn_token');
-      // Force hard navigation to clear any client-side state
-      window.location.href = '/?logged_out=1';
-    }
+    function logout() { CTN.logout(); }
 
     // ── Init ──
+
     async function init() {
-      const user = await checkAuth();
+      const user = await CTN.requireRole('installer', '/app');
       if (!user) return;
 
+      state.user = user;
       document.getElementById('nav-user').textContent = user.email;
 
       try {
-        const [dash, creds, reads] = await Promise.all([
-          authFetch(API + '/api/installer/dashboard').then(r => r.json()),
-          authFetch(API + '/api/installer/credits?page=1&limit=' + PAGE_SIZE).then(r => r.json()),
-          authFetch(API + '/api/installer/readings?page=1&limit=' + PAGE_SIZE).then(r => r.json())
+        const [settings, dashboard, credits, readings] = await Promise.all([
+          CTN.settings(),
+          CTN.get('/api/installer/dashboard'),
+          CTN.get(`/api/installer/credits?page=1&limit=${PAGE_SIZE}`),
+          CTN.get(`/api/installer/readings?page=1&limit=${PAGE_SIZE}`),
         ]);
-        dashboardData = dash;
-        creditsData = creds;
-        readingsData = reads;
-        renderDashboard(dash, creds, reads);
-      } catch(e) {
-        console.error('Dashboard error:', e);
+
+        state.settings = settings;
+        state.dashboard = dashboard;
+        state.credits = { data: credits, page: 1 };
+        state.readings = { data: readings, page: 1 };
+
+        renderDashboard();
+      } catch (e) {
+        console.error('Dashboard load failed:', e);
         document.getElementById('main-content').innerHTML = `
           <div class="empty-state">
             <div class="empty-icon">⚠</div>
-            <div class="empty-title">Could not load dashboard</div>
-            <div class="empty-desc">There was a problem connecting to the server. Please refresh or try again later.</div>
+            <div class="empty-title">Could not load your dashboard</div>
+            <div class="empty-desc">${esc(e.message || 'Please refresh and try again.')}</div>
           </div>`;
       }
     }
 
-    function renderDashboard(dash, creds) {
-      const s = dash.stats;
-      const t = dash.sell_threshold;
-      const hasData = s.total_credits > 0;
+    // ── Render ──
+
+    function renderDashboard() {
+      const { stats, sell_threshold: threshold, installer, credits_by_status: byStatus } = state.dashboard;
+      const pricePerCredit = state.dashboard.pricing.price_per_credit_inr;
+      const hasData = stats.total_credits > 0;
 
       let html = `
         <div class="greeting fade-up">
-          <p class="greeting-label">Installer Dashboard · ${dash.installer.email}</p>
-          <h1>${hasData ? `${s.total_kwh.toLocaleString('en-IN')} kWh<br>of <em>clean energy.</em>` : `Welcome to<br><em>CTN.</em>`}</h1>
+          <p class="greeting-label">Installer Dashboard · ${esc(installer.email)}</p>
+          <h1>${hasData
+            ? `${CTN.fmt.number(stats.total_kwh)} kWh<br>of <em>clean energy.</em>`
+            : `Welcome to<br><em>CTN.</em>`}</h1>
         </div>`;
 
-      // Wallet notice
-      if (!dash.installer.wallet_linked) {
-        html += `<div class="notice notice-amber fade-up">
-          Your credits are held in CTN custody. <a href="#" onclick="alert('Wallet linking coming soon — use MetaMask to sign a verification message.')">Link your wallet</a> to take ownership and enable selling.
+      if (!installer.wallet_linked) {
+        html += `<div class="notice notice-amber fade-up" id="wallet-notice">
+          Your credits are held in CTN custody.
+          <a href="#" onclick="linkWallet(event)">Link your wallet</a>
+          to take ownership and enable selling.
         </div>`;
       }
 
@@ -293,263 +270,251 @@
           <div class="empty-state fade-up fade-up-2" style="padding:4rem 1rem;">
             <div class="empty-icon">☀</div>
             <div class="empty-title">No data yet</div>
-            <div class="empty-desc">Your solar panel is registered. Credits will appear here as energy generation data flows in. Check back soon.</div>
+            <div class="empty-desc">Your device is registered. Credits appear here as generation data arrives.</div>
           </div>`;
         document.getElementById('main-content').innerHTML = html;
         return;
       }
 
-      // Stats grid
       html += `
         <div class="stats-grid fade-up fade-up-2">
           <div class="stat-card">
             <div class="stat-label">Energy generated</div>
-            <div class="stat-value">${s.total_kwh.toLocaleString('en-IN')}</div>
+            <div class="stat-value">${CTN.fmt.number(stats.total_kwh)}</div>
             <div class="stat-unit">kilowatt-hours</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">CO₂ avoided</div>
-            <div class="stat-value green">${s.total_co2_kg.toLocaleString('en-IN')}</div>
-            <div class="stat-unit">kilograms (${s.total_co2_tonnes} t)</div>
+            <div class="stat-value green">${CTN.fmt.number(stats.total_co2_kg)}</div>
+            <div class="stat-unit">kilograms (${stats.total_co2_tonnes} t)</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">Credits earned</div>
-            <div class="stat-value">${s.total_credits}</div>
+            <div class="stat-value">${CTN.fmt.number(stats.total_credits)}</div>
             <div class="stat-unit">carbon credits</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">Estimated value</div>
-            <div class="stat-value amber">₹${s.value_inr.toLocaleString('en-IN')}</div>
-            <div class="stat-unit">$${s.value_usd} USD</div>
+            <div class="stat-value amber">${CTN.fmt.inr(stats.value_inr)}</div>
+            <div class="stat-unit">${CTN.fmt.usd(stats.value_usd)} USD</div>
           </div>
         </div>`;
 
-      // Sell threshold
-      const statusBadge = t.eligible
+      const badge = threshold.eligible
         ? '<span class="threshold-status eligible">Ready to sell</span>'
-        : `<span class="threshold-status pending">${t.remaining} more to go</span>`;
+        : `<span class="threshold-status pending">${threshold.remaining} more to go</span>`;
 
       html += `
         <div class="threshold-card fade-up fade-up-3">
           <div class="threshold-header">
             <div class="threshold-title">Sell threshold</div>
-            ${statusBadge}
+            ${badge}
           </div>
           <div class="progress-track">
-            <div class="progress-fill" style="width:${Math.min(100, t.progress_pct)}%"></div>
+            <div class="progress-fill" style="width:${Math.min(100, threshold.progress_pct)}%"></div>
           </div>
           <div class="progress-label">
-            ${t.eligible ? 'Threshold reached — ready to sell' : `${t.current} of ${t.required} verified credits · ${t.progress_pct}% complete`}
+            ${threshold.eligible
+              ? `${threshold.current} verified credit(s) available to list`
+              : `${threshold.current} of ${threshold.required} verified credits · ${threshold.progress_pct}% complete`}
           </div>
-          ${t.eligible ? `<button class="btn-sell" onclick="openSellModal()" ${!dash.installer.wallet_linked ? 'disabled' : ''}>
-            ${dash.installer.wallet_linked ? 'List credits for sale →' : 'Link wallet to sell'}
-          </button>` : `<div class="sell-note">Earn ${t.remaining} more verified credit${t.remaining !== 1 ? 's' : ''} to unlock selling.</div>`}
+          ${threshold.eligible
+            ? `<button class="btn-sell" onclick="${installer.wallet_linked ? 'openSellModal()' : 'linkWallet(event)'}">
+                 ${installer.wallet_linked ? 'List credits for sale →' : 'Link wallet to sell'}
+               </button>`
+            : `<div class="sell-note">Earn ${threshold.remaining} more verified credit(s) to unlock selling.</div>`}
         </div>`;
 
-      // Credit status summary
-      const cs = dash.credits_by_status;
       html += `
         <div class="card fade-up fade-up-3">
-          <div class="card-header">
-            <div class="card-title">Credit status breakdown</div>
-          </div>
+          <div class="card-header"><div class="card-title">Credit status breakdown</div></div>
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:12px;">
-            <div style="padding:0.5rem;background:var(--bg2);border-radius:var(--radius-sm);text-align:center;">
-              <div style="font-family:var(--serif);font-size:1.25rem;font-weight:300;">${cs.verified}</div>
-              <div style="font-size:10px;color:var(--text3);">Verified</div>
-            </div>
-            <div style="padding:0.5rem;background:var(--bg2);border-radius:var(--radius-sm);text-align:center;">
-              <div style="font-family:var(--serif);font-size:1.25rem;font-weight:300;">${cs.listed}</div>
-              <div style="font-size:10px;color:var(--text3);">Listed</div>
-            </div>
-            <div style="padding:0.5rem;background:var(--bg2);border-radius:var(--radius-sm);text-align:center;">
-              <div style="font-family:var(--serif);font-size:1.25rem;font-weight:300;">${cs.sold + cs.retired}</div>
-              <div style="font-size:10px;color:var(--text3);">Sold / Retired</div>
-            </div>
+            ${statusTile('Verified', byStatus.verified)}
+            ${statusTile('Listed', byStatus.listed + byStatus.reserved)}
+            ${statusTile('Sold / Retired', byStatus.sold + byStatus.retired)}
           </div>
-        </div>`;
+        </div>
 
-      // Info banner
-      html += `
-        <div class="notice notice-blue fade-up fade-up-3" style="margin-bottom: 2rem;">
-          <strong>Your generation data accumulates into credits</strong> — every 1,000 kg (1 metric ton) of CO₂ avoided generates 1 sellable carbon credit.
-        </div>`;
+        <div class="notice notice-blue fade-up fade-up-3" style="margin-bottom:2rem;">
+          <strong>Your generation data accumulates into credits</strong> — every
+          ${CTN.fmt.number(state.settings.kg_co2_per_credit)} kg (1 metric tonne) of CO₂
+          avoided becomes one sellable carbon credit, priced at ${CTN.fmt.inr(pricePerCredit)}.
+        </div>
 
-      // Readings (Section A)
-      html += `
-        <div class="card fade-up fade-up-4">
-          <div class="card-header">
-            <div class="card-title">Generation History</div>
-            <div class="page-info" id="readings-page-info"></div>
-          </div>
-          <div id="readings-list"></div>
-          <div class="pagination">
-            <button class="btn-page" onclick="changeReadingsPage(-1)" id="readings-prev-btn" disabled>← prev</button>
-            <button class="btn-page" onclick="changeReadingsPage(1)" id="readings-next-btn">next →</button>
-          </div>
-        </div>`;
+        ${paginatedCard('readings', 'Generation History')}
+        ${paginatedCard('credits', 'Sellable Credits (1 tonne each)')}`;
 
-      // Credits list (Section B)
-      html += `
-        <div class="card fade-up fade-up-4">
-          <div class="card-header">
-            <div class="card-title">Sellable Credits (1 Tonne Units)</div>
-            <div class="page-info" id="credits-page-info"></div>
-          </div>
-          <div id="credits-list"></div>
-          <div class="pagination">
-            <button class="btn-page" onclick="changeCreditsPage(-1)" id="credits-prev-btn" disabled>← prev</button>
-            <button class="btn-page" onclick="changeCreditsPage(1)" id="credits-next-btn">next →</button>
-          </div>
-        </div>`;
-
-      // Devices
-      if (dash.devices && dash.devices.length > 0) {
+      if (state.dashboard.devices.length) {
         html += `
           <div class="card fade-up fade-up-4">
             <div class="card-title">Your devices</div>
-            ${dash.devices.map(d => `
+            ${state.dashboard.devices.map(d => `
               <div class="device-item">
                 <div>
-                  <div class="device-id">${d.device_id}</div>
-                  <div class="device-meta">${d.location || 'Unknown location'}</div>
+                  <div class="device-id">${esc(d.device_id)}</div>
+                  <div class="device-meta">${esc(d.location || 'Unknown location')}</div>
                 </div>
                 <span class="badge badge-verified">Active</span>
-              </div>
-            `).join('')}
+              </div>`).join('')}
           </div>`;
       }
 
       document.getElementById('main-content').innerHTML = html;
-      renderReadings(readingsData);
-      renderCredits(creds);
+      renderReadings();
+      renderCredits();
     }
 
-    function renderReadings(data) {
+    function statusTile(label, value) {
+      return `
+        <div style="padding:0.5rem;background:var(--bg2);border-radius:var(--radius-sm);text-align:center;">
+          <div style="font-family:var(--serif);font-size:1.25rem;font-weight:300;">${value}</div>
+          <div style="font-size:10px;color:var(--text3);">${label}</div>
+        </div>`;
+    }
+
+    function paginatedCard(key, title) {
+      return `
+        <div class="card fade-up fade-up-4">
+          <div class="card-header">
+            <div class="card-title">${title}</div>
+            <div class="page-info" id="${key}-page-info"></div>
+          </div>
+          <div id="${key}-list"></div>
+          <div class="pagination">
+            <button class="btn-page" onclick="changePage('${key}', -1)" id="${key}-prev-btn">← prev</button>
+            <button class="btn-page" onclick="changePage('${key}', 1)" id="${key}-next-btn">next →</button>
+          </div>
+        </div>`;
+    }
+
+    function renderReadings() {
+      const { data, page } = state.readings;
       const list = document.getElementById('readings-list');
       if (!list) return;
-      if (!data.readings || data.readings.length === 0) {
-        list.innerHTML = '<div style="font-size:12px;color:var(--text3);padding:1rem 0;">No readings found.</div>';
-        return;
-      }
 
-      list.innerHTML = data.readings.map(r => `
+      list.innerHTML = data.readings.length ? data.readings.map(r => `
         <div class="credit-item">
           <div>
-            <div class="credit-id">Reading #${r.reading_id} · ${(r.timestamp || '').slice(0, 16)}</div>
+            <div class="credit-id">Reading ${esc(r.reading_id)} · ${esc((r.timestamp || '').slice(0, 16))}</div>
             <div class="credit-kwh">
               ${(r.total_kwh || 0).toFixed(2)} kWh generated
-              ${r.signature ? `<span style="margin-left:8px;font-size:10px;color:var(--primary);background:rgba(0,255,170,0.1);padding:2px 6px;border-radius:4px;border:1px solid var(--primary);">✓ signed (${r.signature.slice(0,8)}...)</span>` : ''}
+              ${r.signature ? `<span class="sig-chip">✓ signed (${esc(r.signature.slice(0, 8))}…)</span>` : ''}
             </div>
           </div>
-          <div style="display:flex;align-items:center;gap:8px;">
-            <span class="credit-co2">+${(r.co2_avoided_kg || 0).toFixed(1)} kg CO₂</span>
-          </div>
-        </div>
-      `).join('');
+          <span class="credit-co2">+${(r.co2_avoided_kg || 0).toFixed(1)} kg CO₂</span>
+        </div>`).join('')
+        : '<div class="list-empty">No readings recorded yet.</div>';
 
-      const pages = data.pages || 1;
-      const info = document.getElementById('readings-page-info');
-      if (info) info.textContent = `page ${currentReadingsPage} of ${pages}`;
-      const prev = document.getElementById('readings-prev-btn');
-      const next = document.getElementById('readings-next-btn');
-      if (prev) prev.disabled = currentReadingsPage <= 1;
-      if (next) next.disabled = currentReadingsPage >= pages;
+      updatePager('readings', page, data.pages || 1);
     }
 
-    function renderCredits(data) {
+    function renderCredits() {
+      const { data, page } = state.credits;
       const list = document.getElementById('credits-list');
       if (!list) return;
-      if (!data.credits || data.credits.length === 0) {
-        list.innerHTML = '<div style="font-size:12px;color:var(--text3);padding:1rem 0;">No credits accumulated yet.</div>';
+
+      list.innerHTML = data.credits.length ? data.credits.map(c => `
+        <div class="credit-item">
+          <div>
+            <div class="credit-id">Credit #${c.credit_id} · ${CTN.fmt.date(c.period_start)} to ${CTN.fmt.date(c.period_end)}</div>
+            <div class="credit-kwh">
+              ${CTN.fmt.number(c.co2_avoided_kg)} kg CO₂ avoided
+              ${c.on_chain_id ? `<span class="sig-chip">⛓ on-chain #${c.on_chain_id}</span>` : ''}
+            </div>
+          </div>
+          <span class="badge badge-${esc(c.status)}">${esc(c.status)}</span>
+        </div>`).join('')
+        : '<div class="list-empty">No credits accumulated yet.</div>';
+
+      updatePager('credits', page, data.pages || 1);
+    }
+
+    function updatePager(key, page, pages) {
+      document.getElementById(`${key}-page-info`).textContent = `page ${page} of ${pages}`;
+      document.getElementById(`${key}-prev-btn`).disabled = page <= 1;
+      document.getElementById(`${key}-next-btn`).disabled = page >= pages;
+    }
+
+    async function changePage(key, direction) {
+      const entry = state[key];
+      const next = entry.page + direction;
+      if (next < 1 || next > (entry.data.pages || 1)) return;
+
+      try {
+        entry.data = await CTN.get(`/api/installer/${key}?page=${next}&limit=${PAGE_SIZE}`);
+        entry.page = next;
+        key === 'credits' ? renderCredits() : renderReadings();
+      } catch (e) {
+        console.error(`Could not load ${key} page ${next}:`, e);
+      }
+    }
+
+    // ── Wallet linking ──
+
+    async function linkWallet(event) {
+      if (event) event.preventDefault();
+
+      const notice = document.getElementById('wallet-notice');
+      const setNotice = (text) => { if (notice) notice.textContent = text; };
+
+      if (!CTNWallet.isAvailable()) {
+        setNotice('No Ethereum wallet detected. Install MetaMask to link an address and enable selling.');
         return;
       }
 
-      list.innerHTML = data.credits.map(c => `
-        <div class="credit-item">
-          <div>
-            <div class="credit-id">Credit #${c.credit_id} · ${(c.period_start || '').slice(0,10)} to ${(c.period_end || '').slice(0,10)}</div>
-            <div class="credit-kwh">${(c.co2_avoided_kg || 0).toFixed(0)} kg CO₂ Avoided (1 Tonne)</div>
-          </div>
-          <div style="display:flex;align-items:center;gap:8px;">
-            <span class="badge badge-${c.status}">${c.status}</span>
-          </div>
-        </div>
-      `).join('');
-
-      const pages = data.pages || 1;
-      const info = document.getElementById('credits-page-info');
-      if (info) info.textContent = `page ${currentCreditsPage} of ${pages}`;
-      const prev = document.getElementById('credits-prev-btn');
-      const next = document.getElementById('credits-next-btn');
-      if (prev) prev.disabled = currentCreditsPage <= 1;
-      if (next) next.disabled = currentCreditsPage >= pages;
-    }
-
-    async function changeReadingsPage(dir) {
-      const pages = readingsData ? readingsData.pages : 1;
-      const newPage = currentReadingsPage + dir;
-      if (newPage < 1 || newPage > pages) return;
-      currentReadingsPage = newPage;
+      setNotice('Check your wallet — approve the connection, then sign the verification message.');
       try {
-        const r = await authFetch(API + `/api/installer/readings?page=${currentReadingsPage}&limit=${PAGE_SIZE}`);
-        readingsData = await r.json();
-        renderReadings(readingsData);
-      } catch(e) { console.error(e); }
+        const address = await CTNWallet.link();
+        setNotice(`Wallet linked: ${address}. Reloading…`);
+        await init();
+      } catch (e) {
+        setNotice(e.message || 'Could not link your wallet. Please try again.');
+      }
     }
 
-    async function changeCreditsPage(dir) {
-      const pages = creditsData ? creditsData.pages : 1;
-      const newPage = currentCreditsPage + dir;
-      if (newPage < 1 || newPage > pages) return;
-      currentCreditsPage = newPage;
-      try {
-        const r = await authFetch(API + `/api/installer/credits?page=${currentCreditsPage}&limit=${PAGE_SIZE}`);
-        creditsData = await r.json();
-        renderCredits(creditsData);
-      } catch(e) { console.error(e); }
-    }
+    // ── Sell flow ──
 
-    // ── Sell modal ──
     function openSellModal() {
-      if (!dashboardData) return;
-      const modal = document.getElementById('sell-modal');
-      const body = document.getElementById('sell-modal-body');
-      const verified = dashboardData.credits_by_status.verified;
+      const available = state.dashboard.credits_by_status.verified;
+      const price = state.dashboard.pricing.price_per_credit_inr;
+      const minimum = state.dashboard.sell_threshold.required;
 
-      body.innerHTML = `
+      document.getElementById('sell-modal-body').innerHTML = `
         <div style="font-size:12px;color:var(--text2);margin-bottom:0.75rem;">
-          You have <strong>${verified}</strong> verified credits available to list.
-          The platform price is <strong>₹415</strong> per credit ($5 USD).
+          You have <strong>${available}</strong> verified credit(s) available to list at
+          <strong>${CTN.fmt.inr(price)}</strong> each. Minimum listing: ${minimum}.
         </div>
         <div style="background:var(--bg2);border-radius:var(--radius-sm);padding:1rem;font-size:12px;">
           <div style="display:flex;justify-content:space-between;margin-bottom:4px;align-items:center;">
             <span>Credits to list</span>
-            <input type="number" id="sell-quantity" min="1" max="${verified}" value="${verified}" style="width: 80px; text-align: right; padding: 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text);" oninput="updateSellValue(this.value, ${verified})">
+            <input type="number" id="sell-quantity" min="${minimum}" max="${available}" value="${available}"
+                   style="width:80px;text-align:right;padding:4px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);"
+                   oninput="updateSellTotal()">
           </div>
           <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-            <span>Price per credit</span><span>₹415</span>
+            <span>Price per credit</span><span>${CTN.fmt.inr(price)}</span>
           </div>
           <div style="border-top:1px solid var(--border);margin:8px 0;"></div>
           <div style="display:flex;justify-content:space-between;font-weight:500;">
-            <span>Total listing value</span><span id="sell-total-value">₹${(verified * 415).toLocaleString('en-IN')}</span>
+            <span>Total listing value</span><span id="sell-total-value">${CTN.fmt.inr(available * price)}</span>
           </div>
         </div>
         <div style="font-size:11px;color:var(--text3);margin-top:0.5rem;">
-          Listed credits will appear on the marketplace for buyers. You'll receive payment when they're purchased.
-        </div>
-      `;
+          Listed credits appear on the marketplace. You receive payment when a buyer completes a purchase.
+        </div>`;
+
       document.getElementById('sell-error').style.display = 'none';
-      modal.classList.add('visible');
+      document.getElementById('sell-modal').classList.add('visible');
     }
 
-    function updateSellValue(val, maxVal) {
-      let q = parseInt(val) || 0;
-      if (q > maxVal) {
-        q = maxVal;
-        document.getElementById('sell-quantity').value = maxVal;
-      }
-      document.getElementById('sell-total-value').textContent = '₹' + (q * 415).toLocaleString('en-IN');
+    function updateSellTotal() {
+      const input = document.getElementById('sell-quantity');
+      const available = state.dashboard.credits_by_status.verified;
+      const price = state.dashboard.pricing.price_per_credit_inr;
+
+      let quantity = parseInt(input.value, 10) || 0;
+      if (quantity > available) { quantity = available; input.value = available; }
+      document.getElementById('sell-total-value').textContent = CTN.fmt.inr(quantity * price);
     }
 
     function closeSellModal() {
@@ -558,53 +523,36 @@
 
     async function confirmSell() {
       const btn = document.getElementById('sell-confirm-btn');
-      btn.disabled = true; btn.textContent = 'Listing...';
-      const errEl = document.getElementById('sell-error');
-      errEl.style.display = 'none';
+      const errorEl = document.getElementById('sell-error');
+      const minimum = state.dashboard.sell_threshold.required;
+
+      const fail = (message) => {
+        errorEl.textContent = message;
+        errorEl.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = 'List for sale →';
+      };
+
+      errorEl.style.display = 'none';
+      btn.disabled = true;
+      btn.textContent = 'Listing...';
 
       try {
-        // Fetch all verified credit IDs
-        const r = await authFetch(API + '/api/installer/credits?page=1&limit=10000&status_filter=verified');
-        const data = await r.json();
-        const ids = data.credits.map(c => c.id);
+        // Fetch the concrete ids rather than trusting the cached count, which
+        // may be stale if credits were listed from another session.
+        const verified = await CTN.get('/api/installer/credits?page=1&limit=1000&status_filter=verified');
+        const ids = verified.credits.map(c => c.id);
 
-        if (ids.length < 10) {
-          errEl.textContent = `Need at least 10 verified credits. You have ${ids.length}.`;
-          errEl.style.display = 'block';
-          btn.disabled = false; btn.textContent = 'List for sale →';
-          return;
+        const quantity = parseInt(document.getElementById('sell-quantity').value, 10) || 0;
+        if (quantity < minimum || quantity > ids.length) {
+          return fail(`Enter a quantity between ${minimum} and ${ids.length}.`);
         }
 
-        const quantity = parseInt(document.getElementById('sell-quantity').value) || 0;
-        if (quantity < 10 || quantity > ids.length) {
-          errEl.textContent = `Please enter a quantity between 10 and ${ids.length}.`;
-          errEl.style.display = 'block';
-          btn.disabled = false; btn.textContent = 'List for sale →';
-          return;
-        }
-
-        const selectedIds = ids.slice(0, quantity);
-
-        const sellR = await authFetch(API + '/api/installer/sell', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ credit_ids: selectedIds })
-        });
-        const sellData = await sellR.json();
-        if (!sellR.ok) {
-          errEl.textContent = sellData.detail || 'Failed to list credits.';
-          errEl.style.display = 'block';
-          return;
-        }
-
+        await CTN.post('/api/installer/sell', { credit_ids: ids.slice(0, quantity) });
         closeSellModal();
-        // Refresh dashboard
-        init();
-      } catch(e) {
-        errEl.textContent = 'Network error. Please try again.';
-        errEl.style.display = 'block';
-      } finally {
-        btn.disabled = false; btn.textContent = 'List for sale →';
+        await init();
+      } catch (e) {
+        fail(e.message || 'Could not list credits. Please try again.');
       }
     }
 

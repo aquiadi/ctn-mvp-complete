@@ -1,605 +1,555 @@
-from fastapi import FastAPI, HTTPException, Depends, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
-from contextlib import asynccontextmanager
-import requests as http_requests
-import json
-from web3 import Web3
-import os
-import hashlib
+"""
+CTN API — application wiring, public read routes, and on-chain operations.
+
+Role-scoped functionality lives in the routers under `routes/`.
+"""
+
 import asyncio
-from ipfs_utils import upload_credit_to_ipfs
+import os
+import time
+from contextlib import asynccontextmanager
+from datetime import datetime
 
-from database import database, init_db, shutdown_db, db_execute_with_retry
-from auth import require_admin, get_current_user
-from routes.auth_routes import router as auth_router
-from routes.installer_routes import router as installer_router
-from routes.admin_routes import router as admin_router
-from routes.marketplace_routes import router as marketplace_router
-
-# ── Rate limiting ──────────────────────────────────────────────────────────
-
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-limiter = Limiter(key_func=get_remote_address)
+import chain
+import config
+from auth import require_admin
+from database import database, db_execute_with_retry, init_db, shutdown_db
+from ipfs_utils import gateway_url, upload_credit_to_ipfs
+from rate_limit import limiter
+from routes.admin_routes import log_admin_action
+from routes.admin_routes import router as admin_router
+from routes.auth_routes import router as auth_router
+from routes.installer_routes import router as installer_router
+from routes.marketplace_routes import router as marketplace_router
+
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 
 
-# ── App lifecycle ──────────────────────────────────────────────────────────
+# ── Application lifecycle ──────────────────────────────────────────────────
+
+async def release_stale_reservations():
+    """
+    Return credits to the marketplace when a buyer abandons a reservation.
+
+    Without this, a buyer who closes the tab mid-checkout would hold the credit
+    indefinitely and the seller could never sell it.
+    """
+    while True:
+        try:
+            await asyncio.sleep(config.RESERVATION_CLEANUP_INTERVAL_SECONDS)
+            released = await database.execute(
+                query="""UPDATE credits
+                         SET status = 'listed', reserved_by = NULL, reserved_at = NULL
+                         WHERE status = 'reserved' AND reserved_at < :cutoff""",
+                values={"cutoff": time.time() - config.RESERVATION_TIMEOUT_SECONDS},
+            )
+            if released:
+                print(f"✓ Released {released} stale reservation(s)")
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            print(f"⚠ Reservation cleanup error: {exc}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    for warning in config.validate():
+        print(f"⚠ {warning}")
+
     await init_db()
-    # Start background task for stale reservation cleanup
-    cleanup_task = asyncio.create_task(reservation_cleanup_loop())
-    yield
-    cleanup_task.cancel()
-    await shutdown_db()
+    cleanup_task = asyncio.create_task(release_stale_reservations())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        await shutdown_db()
 
 
-app = FastAPI(title="CTN API", version="2.0", lifespan=lifespan)
+app = FastAPI(title="CTN API", version="2.1", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# ── CORS — locked to known origins ────────────────────────────────────────
-
-ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000,http://localhost:3000,https://ctn-mvp-complete-j52y.vercel.app").split(",")
-
+# Credentialed CORS against an explicit allow-list. A wildcard-suffix pattern
+# would let any site on a shared hosting provider call the API with the user's
+# session attached.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|.*\.vercel\.app|.*\.railway\.app|.*\.onrender\.com|.*\.netlify\.app)(:\d+)?",
+    allow_origins=config.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Cache-Control", "Pragma"],
 )
-
-# ── Mount route modules ───────────────────────────────────────────────────
 
 app.include_router(auth_router)
 app.include_router(installer_router)
 app.include_router(admin_router)
 app.include_router(marketplace_router)
 
-# ── Config ─────────────────────────────────────────────────────────────────
 
-IPFS_URL = "https://ivory-geographical-lungfish-400.mypinata.cloud/ipfs/bafybeifpn7y2r2rsjtvm4hun3dy63jkp5ah7qxfwhk5u6bemkapmis2qku"
-EMISSION_FACTOR = 0.82
-CREDIT_VALUE_USD = 5.0
-INR_RATE = 83
-TOTAL_DAYS = 34
+# ── Static pages ───────────────────────────────────────────────────────────
 
-CONTRACT_ADDRESS = "0x1b4F5A7CEf1c2CFb914A5642CC82F887AB0C7Cf6"
-AMOY_RPC = os.getenv("AMOY_RPC", "https://polygon-amoy-bor-rpc.publicnode.com")
-EXPLORER = "https://amoy.polygonscan.com"
+def _page(filename: str):
+    def handler():
+        return FileResponse(os.path.join(FRONTEND_DIR, filename))
 
-# ── Load data from IPFS once at startup ────────────────────────────────────
-# (Removed in-memory IPFS loader; data is now synchronized via SQLite in database.py)
+    return handler
 
-# ── Helper ─────────────────────────────────────────────────────────────────
 
-async def calculate_stats():
-    stats_query = """
-        SELECT 
-            COALESCE(SUM(total_kwh), 0) as total_kwh,
-            COALESCE(SUM(co2_avoided_kg), 0) as total_co2,
-            COUNT(*) as total_credits,
-            MIN(period_start) as period_start,
-            MAX(period_end) as period_end,
-            MIN(device_id) as device_id
-        FROM credits
+for _route, _file in {
+    "/": "index.html",
+    "/login": "login.html",
+    "/app": "app.html",
+    "/app/history": "app-history.html",
+    "/admin": "admin.html",
+    "/marketplace": "marketplace.html",
+}.items():
+    app.get(_route, include_in_schema=False)(_page(_file))
+
+
+@app.get("/static/{filename}", include_in_schema=False)
+def static_asset(filename: str):
+    """Serve the shared frontend modules."""
+    if not filename.endswith((".js", ".css")) or "/" in filename or ".." in filename:
+        raise HTTPException(404, "Not found")
+
+    path = os.path.join(FRONTEND_DIR, "static", filename)
+    if not os.path.isfile(path):
+        raise HTTPException(404, "Not found")
+    return FileResponse(path)
+
+
+# ── Platform statistics ────────────────────────────────────────────────────
+
+def _parse_timestamp(value: str):
+    try:
+        return datetime.fromisoformat(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _period_days(period_start: str, period_end: str) -> int:
     """
-    row = await database.fetch_one(stats_query)
-    
-    total_kwh = row["total_kwh"] if row else 0
-    total_co2 = row["total_co2"] if row else 0
-    total_credits = row["total_credits"] if row else 0
-    
+    Number of days the dataset spans, used to derive daily averages.
+
+    Falls back to 1 so a single-day dataset — or one with unparseable
+    timestamps — divides safely instead of producing a zero-division or a
+    figure scaled against an unrelated constant.
+    """
+    start, end = _parse_timestamp(period_start), _parse_timestamp(period_end)
+    if not start or not end:
+        return 1
+    return max(1, (end - start).days)
+
+
+async def calculate_stats() -> dict:
+    """Platform-wide generation, credit, and value totals."""
+    row = await database.fetch_one(
+        """SELECT COALESCE(SUM(total_kwh), 0)      AS total_kwh,
+                  COALESCE(SUM(co2_avoided_kg), 0) AS total_co2,
+                  COUNT(*)                         AS total_credits,
+                  MIN(period_start)                AS period_start,
+                  MAX(period_end)                  AS period_end,
+                  MIN(device_id)                   AS device_id
+           FROM credits"""
+    )
+
+    total_kwh = row["total_kwh"] or 0
+    total_co2 = row["total_co2"] or 0
+    total_credits = row["total_credits"] or 0
+    period_start = row["period_start"] or ""
+    period_end = row["period_end"] or ""
+    days = _period_days(period_start, period_end)
+
     return {
         "total_kwh": round(total_kwh, 2),
         "total_co2_kg": round(total_co2, 2),
         "total_co2_tonnes": round(total_co2 / 1000, 2),
         "total_credits": total_credits,
-        "daily_avg_kwh": round(total_kwh / TOTAL_DAYS, 2),
-        "daily_avg_co2_kg": round(total_co2 / TOTAL_DAYS, 2),
-        "daily_avg_credits": round(total_credits / TOTAL_DAYS, 1),
-        "monthly_credits": round(total_credits / TOTAL_DAYS * 30),
-        "yearly_credits": round(total_credits / TOTAL_DAYS * 365),
-        "value_usd": round(total_credits * CREDIT_VALUE_USD, 2),
-        "value_inr": round(total_credits * CREDIT_VALUE_USD * INR_RATE, 2),
-        "device_id": row["device_id"] if row else "unknown",
-        "period_start": row["period_start"] if row else "",
-        "period_end": row["period_end"] if row else "",
-        "methodology": "CEA Grid Emission Factor 0.82 kg CO2/kWh",
-        "ipfs_master": IPFS_URL,
-        "contract": CONTRACT_ADDRESS,
-        "explorer": f"{EXPLORER}/address/{CONTRACT_ADDRESS}"
+        "period_days": days,
+        "daily_avg_kwh": round(total_kwh / days, 2),
+        "daily_avg_co2_kg": round(total_co2 / days, 2),
+        "daily_avg_credits": round(total_credits / days, 2),
+        "monthly_credits": round(total_credits / days * 30, 1),
+        "yearly_credits": round(total_credits / days * 365, 1),
+        "value_usd": round(total_credits * config.CREDIT_VALUE_USD, 2),
+        "value_inr": round(total_credits * config.CREDIT_VALUE_INR, 2),
+        "price_per_credit_usd": config.CREDIT_VALUE_USD,
+        "price_per_credit_inr": config.CREDIT_VALUE_INR,
+        "kg_co2_per_credit": config.KG_CO2_PER_CREDIT,
+        "device_id": row["device_id"] or "unknown",
+        "period_start": period_start,
+        "period_end": period_end,
+        "methodology": config.METHODOLOGY,
+        "ipfs_master": config.IPFS_SEED_URL,
+        "contract": config.CONTRACT_ADDRESS,
+        "explorer": chain.contract_url(),
     }
 
-# ── Stale reservation cleanup ─────────────────────────────────────────────
 
-RESERVATION_TIMEOUT_MINUTES = 15
+# ── CO2 equivalence ────────────────────────────────────────────────────────
 
-async def reservation_cleanup_loop():
-    """Background task: release stale reservations every 5 minutes."""
-    import time
-    while True:
-        try:
-            await asyncio.sleep(300)  # 5 minutes
-            cutoff = time.time() - (RESERVATION_TIMEOUT_MINUTES * 60)
-            result = await database.execute(
-                query="""UPDATE credits SET status = 'listed', reserved_by = NULL, reserved_at = NULL
-                         WHERE status = 'reserved' AND reserved_at < :cutoff""",
-                values={"cutoff": cutoff}
-            )
-            if result and result > 0:
-                print(f"✓ Released {result} stale reservation(s)")
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            print(f"⚠ Reservation cleanup error: {e}")
+# Published averages used to translate a mass of CO2 into something tangible.
+CO2_EQUIVALENTS_KG = {
+    "trees_planted_10yr": 21.0,      # sequestration by one tree over 10 years
+    "cars_off_road_1yr": 4600.0,     # average passenger car, annual emissions
+    "flights_delhi_mumbai": 180.0,   # one economy seat, one way
+    "flights_delhi_ny": 8700.0,      # one economy seat, one way
+    "km_not_driven": 0.21,           # average passenger car, per km
+    "smartphones_charged": 0.008,    # one full charge
+}
 
-# ── Public read-only routes (unchanged response shapes) ────────────────────
 
-import os
-FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+def co2_equivalents(kg_co2: float) -> dict:
+    """Express a mass of CO2 in everyday terms."""
+    return {
+        name: round(kg_co2 / factor, 3 if factor > 1000 else 1)
+        for name, factor in CO2_EQUIVALENTS_KG.items()
+    }
 
-@app.get("/")
-def root():
-    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
-@app.get("/login")
-def login_page():
-    return FileResponse(os.path.join(FRONTEND_DIR, "login.html"))
+# ── Public read routes ─────────────────────────────────────────────────────
 
-@app.get("/app")
-def app_page():
-    return FileResponse(os.path.join(FRONTEND_DIR, "app.html"))
+@app.get("/healthz", include_in_schema=False)
+async def healthz():
+    """
+    Liveness probe for the hosting platform.
 
-@app.get("/app/history")
-def app_history_page():
-    return FileResponse(os.path.join(FRONTEND_DIR, "app-history.html"))
+    Confirms the process is up and the database answers, without the heavier
+    contract and wallet checks in /api/admin/system-health. Returns 503 so an
+    orchestrator restarts the instance if the database is unreachable.
+    """
+    try:
+        await database.fetch_one("SELECT 1")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"database unavailable: {exc}"
+        )
+    return {"status": "ok", "version": app.version}
 
-@app.get("/admin")
-def admin_page():
-    return FileResponse(os.path.join(FRONTEND_DIR, "admin.html"))
-
-@app.get("/marketplace")
-def marketplace_page():
-    return FileResponse(os.path.join(FRONTEND_DIR, "marketplace.html"))
 
 @app.get("/api")
 async def api_root():
-    count_row = await database.fetch_one("SELECT COUNT(*) as cnt FROM credits")
-    count = count_row["cnt"] if count_row else 0
+    row = await database.fetch_one("SELECT COUNT(*) AS cnt FROM credits")
     return {
         "name": "CTN API",
-        "version": "2.0",
-        "credits_loaded": count,
-        "docs": "/docs"
+        "version": app.version,
+        "credits_loaded": row["cnt"] if row else 0,
+        "docs": "/docs",
     }
+
+
+@app.get("/config")
+def public_config():
+    """Values the frontend needs so it never has to hardcode them."""
+    return {
+        "price_per_credit_usd": config.CREDIT_VALUE_USD,
+        "price_per_credit_inr": config.CREDIT_VALUE_INR,
+        "usd_to_inr": config.USD_TO_INR,
+        "kg_co2_per_credit": config.KG_CO2_PER_CREDIT,
+        "emission_factor_kg_per_kwh": config.EMISSION_FACTOR_KG_PER_KWH,
+        "methodology": config.METHODOLOGY,
+        "standard": config.STANDARD,
+        "sell_threshold": config.SELL_THRESHOLD,
+        "reservation_timeout_minutes": config.RESERVATION_TIMEOUT_MINUTES,
+        "contract_address": config.CONTRACT_ADDRESS,
+        "explorer": config.EXPLORER,
+        "contract_explorer_url": chain.contract_url(),
+        "chain_writes_enabled": chain.is_configured(),
+    }
+
 
 @app.get("/stats")
 async def get_stats():
-    """Full dashboard stats — kWh, CO2, credits, INR value"""
+    """Dashboard totals — energy, CO2, credits, and value."""
     return await calculate_stats()
+
 
 @app.get("/credits")
 async def get_credits(page: int = 1, limit: int = 20):
-    """Paginated credit list"""
-    offset = (page - 1) * limit
+    """Paginated public credit ledger."""
+    page, limit = max(1, page), max(1, min(limit, 200))
+
     credits = await database.fetch_all(
-        query="SELECT * FROM credits ORDER BY credit_id DESC LIMIT :limit OFFSET :offset",
-        values={"limit": limit, "offset": offset}
+        query="""SELECT credit_id, device_id, total_kwh, co2_avoided_kg,
+                        period_start, period_end, status, on_chain_id,
+                        ipfs_hash, tx_hash, location
+                 FROM credits ORDER BY credit_id DESC LIMIT :limit OFFSET :offset""",
+        values={"limit": limit, "offset": (page - 1) * limit},
     )
-    count_row = await database.fetch_one("SELECT COUNT(*) as cnt FROM credits")
-    total = count_row["cnt"] if count_row else 0
-    
+    row = await database.fetch_one("SELECT COUNT(*) AS cnt FROM credits")
+    total = row["cnt"] if row else 0
+
     return {
         "credits": [dict(c) for c in credits],
         "total": total,
         "page": page,
-        "pages": max(1, -(-total // limit))
+        "pages": max(1, -(-total // limit)),
     }
+
 
 @app.get("/credits/{credit_id}")
 async def get_credit(credit_id: int):
-    """Single credit by ID"""
-    credit = await database.fetch_one("SELECT * FROM credits WHERE credit_id = :credit_id", {"credit_id": credit_id})
+    """A single credit by its public id."""
+    credit = await database.fetch_one(
+        "SELECT * FROM credits WHERE credit_id = :credit_id", {"credit_id": credit_id}
+    )
     if not credit:
         raise HTTPException(404, f"Credit #{credit_id} not found")
     return dict(credit)
 
+
 @app.get("/value/{credits}")
 def credit_value(credits: int):
-    """Calculate INR/USD value of N credits"""
+    """Monetary and CO2 value of a number of credits."""
+    if credits < 0:
+        raise HTTPException(400, "Credit count cannot be negative")
+
+    kg_co2 = credits * config.KG_CO2_PER_CREDIT
     return {
         "credits": credits,
-        "usd": round(credits * CREDIT_VALUE_USD, 2),
-        "inr": round(credits * CREDIT_VALUE_USD * INR_RATE, 2),
-        "co2_kg": round(credits * 50 * EMISSION_FACTOR, 2),
-        "co2_equivalents": {
-            "trees_10yr": round(credits * 50 * EMISSION_FACTOR / 21),
-            "cars_off_road": round(credits * 50 * EMISSION_FACTOR / 4600),
-            "flights_delhi_ny": round(credits * 50 * EMISSION_FACTOR / 8700, 2)
-        }
+        "usd": round(credits * config.CREDIT_VALUE_USD, 2),
+        "inr": round(credits * config.CREDIT_VALUE_INR, 2),
+        "co2_kg": round(kg_co2, 2),
+        "co2_equivalents": co2_equivalents(kg_co2),
     }
+
 
 @app.get("/daily")
 async def daily_breakdown():
-    """Average daily generation stats"""
+    """Average generation per day across the dataset."""
     stats = await calculate_stats()
     return {
         "kwh_per_day": stats["daily_avg_kwh"],
         "co2_per_day_kg": stats["daily_avg_co2_kg"],
         "credits_per_day": stats["daily_avg_credits"],
-        "inr_per_day": round(stats["daily_avg_credits"] * CREDIT_VALUE_USD * INR_RATE, 2),
-        "period_days": TOTAL_DAYS
+        "inr_per_day": round(stats["daily_avg_credits"] * config.CREDIT_VALUE_INR, 2),
+        "period_days": stats["period_days"],
     }
+
 
 @app.get("/compare/{kg_co2}")
 def compare_co2(kg_co2: float):
-    """Compare CO2 to real world equivalents"""
-    return {
-        "kg_co2": kg_co2,
-        "equivalent_to": {
-            "trees_planted_10yr": round(kg_co2 / 21),
-            "cars_off_road_1yr": round(kg_co2 / 4600, 2),
-            "flights_delhi_mumbai": round(kg_co2 / 180, 1),
-            "flights_delhi_ny": round(kg_co2 / 8700, 3),
-            "km_not_driven": round(kg_co2 / 0.21),
-            "smartphones_charged": round(kg_co2 / 0.008)
-        }
-    }
+    """Translate a mass of CO2 into everyday equivalents."""
+    if kg_co2 < 0:
+        raise HTTPException(400, "CO2 mass cannot be negative")
+    return {"kg_co2": kg_co2, "equivalent_to": co2_equivalents(kg_co2)}
 
-@app.get("/agent/context")
-async def agent_context():
-    """Pre-built context for Gemma agent"""
-    stats = await calculate_stats()
-    daily = {
-        "kwh": stats["daily_avg_kwh"],
-        "co2_kg": stats["daily_avg_co2_kg"],
-        "credits": stats["daily_avg_credits"]
-    }
-    return {
-        "system_prompt": f"""You are Krishi, CTN's friendly field agent for solar carbon credits in Patna, Bihar, India.
 
-REAL DATA — always use these numbers, never make up values:
-Device: {stats['device_id']}
-Period: {TOTAL_DAYS} days ({stats['period_start'][:10]} to {stats['period_end'][:10]})
-
-TOTALS:
-- Energy generated: {stats['total_kwh']} kWh
-- CO2 avoided: {stats['total_co2_kg']} kg ({stats['total_co2_tonnes']} tonnes)
-- Credits earned: {stats['total_credits']}
-- Value: ${stats['value_usd']} USD / ₹{stats['value_inr']:,} INR
-
-DAILY AVERAGES:
-- Per day: {daily['kwh']} kWh, {daily['co2_kg']} kg CO2, {daily['credits']} credits
-- Per month: ~{stats['monthly_credits']} credits (~₹{round(stats['monthly_credits'] * CREDIT_VALUE_USD * INR_RATE):,})
-- Per year: ~{stats['yearly_credits']} credits (~₹{round(stats['yearly_credits'] * CREDIT_VALUE_USD * INR_RATE):,})
-
-CO2 CONTEXT:
-- {stats['total_co2_kg']} kg CO2 = {round(stats['total_co2_kg']/21)} trees planted for 10 years
-- {stats['total_co2_kg']} kg CO2 = taking {round(stats['total_co2_kg']/4600, 1)} cars off road for a year
-
-RULES:
-- If asked about ONE DAY → use daily averages
-- If asked about total → use totals
-- Respond in same language as question (Hindi or English)
-- Use analogies farmers understand
-- Never just repeat numbers — explain what they mean
-- End with one actionable suggestion""",
-        "stats": stats,
-        "daily": daily
-    }
-
-# ── Blockchain config ──────────────────────────────────────────────────────
-
-PRIVATE_KEY = os.getenv("PRIVATE_KEY", "").strip().strip('"').strip("'")
-if PRIVATE_KEY.startswith("0x") or PRIVATE_KEY.startswith("0X"):
-    PRIVATE_KEY = PRIVATE_KEY[2:]
-
-PINATA_API_KEY = os.getenv("PINATA_API_KEY")
-PINATA_SECRET = os.getenv("PINATA_SECRET")
-
-w3 = Web3(Web3.HTTPProvider(AMOY_RPC))
-
-ABI = [
-    {
-        "inputs": [
-            {"internalType": "address", "name": "recipient", "type": "address"},
-            {"internalType": "string", "name": "ipfsHash", "type": "string"},
-            {"internalType": "uint256", "name": "energyKwh", "type": "uint256"},
-            {"internalType": "uint256", "name": "co2AvoidedKg", "type": "uint256"}
-        ],
-        "name": "mintCredit",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
-    {
-        "inputs": [{"internalType": "uint256", "name": "creditId", "type": "uint256"}],
-        "name": "getCredit",
-        "outputs": [
-            {
-                "components": [
-                    {"internalType": "string", "name": "ipfsHash", "type": "string"},
-                    {"internalType": "uint256", "name": "energyKwh", "type": "uint256"},
-                    {"internalType": "uint256", "name": "co2AvoidedKg", "type": "uint256"},
-                    {"internalType": "uint256", "name": "timestamp", "type": "uint256"},
-                    {"internalType": "bool", "name": "retired", "type": "bool"},
-                    {"internalType": "address", "name": "holder", "type": "address"}
-                ],
-                "internalType": "struct CarbonCredit.Credit",
-                "name": "",
-                "type": "tuple"
-            }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [],
-        "name": "owner",
-        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [],
-        "name": "totalCredits",
-        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [
-            {"internalType": "uint256", "name": "creditId", "type": "uint256"}
-        ],
-        "name": "retireCredit",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
-    # ── New functions from Stage C.5 contract upgrade ──
-    {
-        "inputs": [
-            {"internalType": "uint256", "name": "creditId", "type": "uint256"},
-            {"internalType": "address", "name": "newHolder", "type": "address"}
-        ],
-        "name": "transferCredit",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
-    {
-        "inputs": [
-            {"internalType": "uint256", "name": "creditId", "type": "uint256"}
-        ],
-        "name": "retireCreditFor",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
-    # ── Events ──
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "internalType": "uint256", "name": "id", "type": "uint256"},
-            {"indexed": False, "internalType": "string", "name": "ipfsHash", "type": "string"},
-            {"indexed": False, "internalType": "address", "name": "holder", "type": "address"}
-        ],
-        "name": "CreditMinted",
-        "type": "event"
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "internalType": "uint256", "name": "id", "type": "uint256"},
-            {"indexed": False, "internalType": "address", "name": "holder", "type": "address"}
-        ],
-        "name": "CreditRetired",
-        "type": "event"
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "internalType": "uint256", "name": "id", "type": "uint256"},
-            {"indexed": False, "internalType": "address", "name": "newHolder", "type": "address"}
-        ],
-        "name": "CreditTransferred",
-        "type": "event"
-    }
-]
-
-contract = w3.eth.contract(
-    address=Web3.to_checksum_address(CONTRACT_ADDRESS),
-    abi=ABI
-)
-
-# ── Debug endpoint ─────────────────────────────────────────────────────────
-
-@app.get("/debug")
-def debug():
-    try:
-        account = w3.eth.account.from_key(PRIVATE_KEY)
-        contract_owner = contract.functions.owner().call()
-        balance = w3.eth.get_balance(account.address)
-        return {
-            "signing_wallet": account.address,
-            "contract_owner": contract_owner,
-            "is_owner": account.address.lower() == contract_owner.lower(),
-            "wallet_balance_matic": round(w3.from_wei(balance, "ether"), 4),
-            "chain_id": w3.eth.chain_id,
-            "connected": w3.is_connected()
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-# ── (Moved to ipfs_utils.py) ────────────────────────────────────────────────
-
-# ── Mint a single credit on blockchain — NOW AUTH-GATED (admin only) ─────
+# ── On-chain operations ────────────────────────────────────────────────────
 
 @app.post("/mint/{credit_id}")
-@limiter.limit("2/minute")
+@limiter.limit(config.CHAIN_WRITE_RATE_LIMIT)
 async def mint_credit(
     request: Request,
     credit_id: int,
     recipient: str,
-    admin: dict = Depends(require_admin)
+    reason: str = "Admin mint",
+    admin: dict = Depends(require_admin),
 ):
     """
-    Mint a specific credit on blockchain.
-    REQUIRES ADMIN AUTH — no longer publicly accessible.
-    recipient = wallet address to receive the credit
+    Mint a verified credit onto the blockchain and record the result.
+
+    The on-chain id, transaction hash, and certificate CID are persisted so
+    verification is a direct lookup rather than a scan of the whole contract.
     """
+    chain.require_configured()
+    recipient_address = chain.parse_address(recipient)
 
-    # 1. Find credit in loaded data
-    credit = await database.fetch_one("SELECT * FROM credits WHERE credit_id = :credit_id", {"credit_id": credit_id})
-    if not credit:
+    row = await database.fetch_one(
+        "SELECT * FROM credits WHERE credit_id = :credit_id", {"credit_id": credit_id}
+    )
+    if not row:
         raise HTTPException(404, f"Credit #{credit_id} not found")
-    credit = dict(credit)
+    credit = dict(row)
 
-    # 2. Upload this individual credit to IPFS
-    individual_hash = upload_credit_to_ipfs(credit)
-
-    # 3. Build blockchain transaction
-    account = w3.eth.account.from_key(PRIVATE_KEY)
-
-    tx = contract.functions.mintCredit(
-        Web3.to_checksum_address(recipient),
-        individual_hash,
-        int(credit.get("total_kwh", 0) * 1000),
-        int(credit.get("co2_avoided_kg", 0) * 1000)
-    ).build_transaction({
-        "from": account.address,
-        "nonce": w3.eth.get_transaction_count(account.address),
-        "gas": 300000,
-        "gasPrice": w3.eth.gas_price
-    })
-
-    # 4. Sign and send
-    signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-    receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-
-    # 5. Check if transaction actually succeeded on-chain
-    if receipt.status == 0:
+    if credit.get("on_chain_id"):
         raise HTTPException(
-            500,
-            f"Transaction REVERTED on-chain. Check tx on Polygonscan: {EXPLORER}/tx/{tx_hash.hex()}"
+            409,
+            f"Credit #{credit_id} is already on-chain as #{credit['on_chain_id']} "
+            f"(tx {credit.get('tx_hash')}).",
         )
 
-    # 6. Get on-chain credit ID (contract auto-increments totalCredits)
-    on_chain_id = contract.functions.totalCredits().call()
+    await log_admin_action(
+        admin_id=admin["id"],
+        action="mint",
+        target_type="credit",
+        target_id=str(credit_id),
+        reason=reason,
+        details=f"recipient={recipient_address}",
+    )
+
+    # Pin the certificate for this specific credit if issuance could not.
+    ipfs_hash = credit.get("ipfs_hash")
+    if not ipfs_hash or ipfs_hash.startswith("local-"):
+        ipfs_hash = upload_credit_to_ipfs(credit)
+
+    try:
+        result = await chain.mint(
+            recipient_address,
+            ipfs_hash,
+            credit.get("total_kwh") or 0,
+            credit.get("co2_avoided_kg") or 0,
+        )
+    except chain.ChainError as exc:
+        raise HTTPException(502, str(exc))
+
+    await db_execute_with_retry(
+        query="""UPDATE credits
+                 SET on_chain_id = :on_chain_id, tx_hash = :tx_hash,
+                     ipfs_hash = :ipfs_hash, minted_at = :now
+                 WHERE credit_id = :credit_id""",
+        values={
+            "on_chain_id": result["on_chain_id"],
+            "tx_hash": result["tx_hash"],
+            "ipfs_hash": ipfs_hash,
+            "now": time.time(),
+            "credit_id": credit_id,
+        },
+    )
 
     return {
         "status": "minted",
         "credit_id": credit_id,
-        "on_chain_id": on_chain_id,
-        "recipient": recipient,
-        "individual_ipfs_hash": individual_hash,
-        "tx_hash": tx_hash.hex(),
-        "polygonscan": f"{EXPLORER}/tx/{tx_hash.hex()}",
-        "verify_ipfs": f"https://gateway.pinata.cloud/ipfs/{individual_hash}"
+        "on_chain_id": result["on_chain_id"],
+        "recipient": recipient_address,
+        "ipfs_hash": ipfs_hash,
+        "tx_hash": result["tx_hash"],
+        "polygonscan": chain.tx_url(result["tx_hash"]),
+        "verify_ipfs": gateway_url(ipfs_hash),
     }
 
-# ── Verify credit on blockchain (read-only — stays public) ───────────────
 
 @app.get("/verify/{credit_id}")
 async def verify_on_chain(credit_id: int):
     """
-    Verify a credit by its IPFS credit ID.
-    Uses IPFS source data for display values (consistent with /credits and /stats),
-    and scans on-chain records to find the matching blockchain entry.
+    Verify a credit against the blockchain.
+
+    Resolved through the on-chain id recorded at mint time. Matching by value
+    is not possible now that every credit represents exactly one tonne — the
+    stored quantities are identical across all of them.
     """
-    # 1. Look up credit in IPFS source data (same source as /credits and /stats)
-    credit_row = await database.fetch_one("SELECT * FROM credits WHERE credit_id = :credit_id", {"credit_id": credit_id})
-    if not credit_row:
+    row = await database.fetch_one(
+        "SELECT * FROM credits WHERE credit_id = :credit_id", {"credit_id": credit_id}
+    )
+    if not row:
         raise HTTPException(404, f"Credit #{credit_id} not found")
-    credit = dict(credit_row)
+    credit = dict(row)
 
     response = {
         "credit_id": credit_id,
         "on_chain": False,
-        "energy_kwh": round(credit.get("total_kwh", 0), 3),
-        "co2_avoided_kg": round(credit.get("co2_avoided_kg", 0), 3),
-        "methodology": credit.get("methodology", ""),
-        "device_id": credit.get("device_id", ""),
-        "period": f"{credit.get('period_start', '')[:10]} → {credit.get('period_end', '')[:10]}",
-        "ipfs_master": IPFS_URL,
-        "signature": credit.get("signature", ""),
+        "status": credit.get("status"),
+        "energy_kwh": round(credit.get("total_kwh") or 0, 3),
+        "co2_avoided_kg": round(credit.get("co2_avoided_kg") or 0, 3),
+        "methodology": credit.get("methodology") or config.METHODOLOGY,
+        "standard": credit.get("standard") or config.STANDARD,
+        "device_id": credit.get("device_id") or "",
+        "period": f"{str(credit.get('period_start') or '')[:10]} → "
+                  f"{str(credit.get('period_end') or '')[:10]}",
+        "ipfs_master": config.IPFS_SEED_URL,
+        "certificate_ipfs": gateway_url(credit.get("ipfs_hash")),
     }
 
-    # 2. Try to find matching on-chain record
-    #    On-chain IDs are auto-incremented by the contract and may not match IPFS credit IDs
-    #    (e.g. due to test mints creating duplicate entries). We match by comparing the
-    #    energy/co2 values that were stored at mint time (original value × 1000 for uint256).
+    on_chain_id = credit.get("on_chain_id")
+    if not on_chain_id:
+        response["detail"] = "Issued and certified, but not yet minted on-chain."
+        return response
+
     try:
-        total_on_chain = contract.functions.totalCredits().call()
-        expected_kwh = int(credit.get("total_kwh", 0) * 1000)
-        expected_co2 = int(credit.get("co2_avoided_kg", 0) * 1000)
+        record = await chain.get_credit(on_chain_id)
+    except Exception as exc:
+        response["chain_error"] = str(exc)
+        return response
 
-        for oc_id in range(1, total_on_chain + 1):
-            result = contract.functions.getCredit(oc_id).call()
-            # Skip empty/unminted slots
-            if result[0] == "" and result[5] == "0x0000000000000000000000000000000000000000":
-                continue
-            if result[1] == expected_kwh and result[2] == expected_co2:
-                response.update({
-                    "on_chain": True,
-                    "on_chain_id": oc_id,
-                    "ipfs_hash": result[0],
-                    "timestamp": result[3],
-                    "retired": result[4],
-                    "holder": result[5],
-                    "verify_ipfs": f"https://gateway.pinata.cloud/ipfs/{result[0]}",
-                    "polygonscan": f"{EXPLORER}/address/{CONTRACT_ADDRESS}"
-                })
-                break
-    except Exception as e:
-        response["chain_error"] = str(e)
+    if not record:
+        response["chain_error"] = f"On-chain record #{on_chain_id} is empty."
+        return response
 
+    response.update(
+        {
+            "on_chain": True,
+            "on_chain_id": record["on_chain_id"],
+            "on_chain_energy_kwh": record["energy_kwh"],
+            "on_chain_co2_avoided_kg": record["co2_avoided_kg"],
+            "timestamp": record["timestamp"],
+            "retired": record["retired"],
+            "holder": record["holder"],
+            "ipfs_hash": record["ipfs_hash"],
+            "verify_ipfs": gateway_url(record["ipfs_hash"]),
+            "tx_hash": credit.get("tx_hash"),
+            "polygonscan": chain.tx_url(credit["tx_hash"]) if credit.get("tx_hash")
+                           else chain.contract_url(),
+            # The recorded quantities should equal what the database holds; a
+            # mismatch means the two ledgers have diverged.
+            "values_match": (
+                round(record["energy_kwh"], 3) == response["energy_kwh"]
+                and round(record["co2_avoided_kg"], 3) == response["co2_avoided_kg"]
+            ),
+        }
+    )
     return response
 
-# ── Retire credit on blockchain — NOW AUTH-GATED (admin only) ─────────────
 
 @app.post("/retire/{credit_id}")
-@limiter.limit("2/minute")
+@limiter.limit(config.CHAIN_WRITE_RATE_LIMIT)
 async def retire_credit(
     request: Request,
     credit_id: int,
-    admin: dict = Depends(require_admin)
+    reason: str = "Admin retirement",
+    admin: dict = Depends(require_admin),
 ):
     """
-    Permanently retire a credit — marks it as offset on-chain.
-    REQUIRES ADMIN AUTH — no longer publicly accessible.
+    Permanently retire a minted credit, completing the offset.
+
+    Addressed by the credit's on-chain id, not its database id — the contract
+    assigns its own sequence and the two do not correspond.
     """
+    chain.require_configured()
+
+    row = await database.fetch_one(
+        "SELECT * FROM credits WHERE credit_id = :credit_id", {"credit_id": credit_id}
+    )
+    if not row:
+        raise HTTPException(404, f"Credit #{credit_id} not found")
+    credit = dict(row)
+
+    if not credit.get("on_chain_id"):
+        raise HTTPException(400, f"Credit #{credit_id} has not been minted on-chain yet.")
+    if credit.get("status") == "retired":
+        raise HTTPException(409, f"Credit #{credit_id} is already retired.")
+
+    await log_admin_action(
+        admin_id=admin["id"],
+        action="retire",
+        target_type="credit",
+        target_id=str(credit_id),
+        reason=reason,
+        details=f"on_chain_id={credit['on_chain_id']}",
+    )
+
     try:
-        account = w3.eth.account.from_key(PRIVATE_KEY)
-        
-        tx = contract.functions.retireCredit(credit_id).build_transaction({
-            "from": account.address,
-            "nonce": w3.eth.get_transaction_count(account.address),
-            "gas": 100000,
-            "gasPrice": w3.eth.gas_price
-        })
-        
-        signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-        
-        if receipt.status == 0:
-            raise HTTPException(500, f"Retirement REVERTED. TX: {tx_hash.hex()}")
-        
-        return {
-            "status": "retired",
-            "credit_id": credit_id,
-            "tx_hash": tx_hash.hex(),
-            "polygonscan": f"{EXPLORER}/tx/{tx_hash.hex()}",
-            "message": "Credit permanently retired — CO2 offset is now verified on-chain"
-        }
-    except Exception as e:
-        raise HTTPException(500, str(e))
+        tx_hash = await chain.retire(credit["on_chain_id"])
+    except chain.ChainError as exc:
+        raise HTTPException(502, str(exc))
+
+    await db_execute_with_retry(
+        query="""UPDATE credits
+                 SET status = 'retired', retired_at = :now, retire_tx_hash = :tx_hash
+                 WHERE credit_id = :credit_id""",
+        values={"now": time.time(), "tx_hash": tx_hash, "credit_id": credit_id},
+    )
+
+    return {
+        "status": "retired",
+        "credit_id": credit_id,
+        "on_chain_id": credit["on_chain_id"],
+        "tx_hash": tx_hash,
+        "polygonscan": chain.tx_url(tx_hash),
+        "message": "Credit permanently retired — the offset is now verified on-chain.",
+    }

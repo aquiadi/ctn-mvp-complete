@@ -1,46 +1,56 @@
 """
-CTN Admin Routes — full visibility, manual mint/retire with audit logging, system health.
-All routes require admin role.
+CTN Admin routes — platform visibility, data ingestion, audit trail, health.
+
+Every administrative action is recorded in `audit_log` with the acting admin,
+a timestamp, and a stated reason.
 """
 
-import time
-from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File
-from pydantic import BaseModel
-from typing import Optional
 import csv
 import io
-from database import database, db_execute_with_retry, process_raw_readings
+from typing import Optional
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from pydantic import BaseModel, Field, field_validator
+
+import chain
+import config
 from auth import require_admin
+from database import database, db_execute_with_retry, process_raw_readings
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+CSV_REQUIRED_COLUMNS = {"device_id", "timestamp", "delta_kwh"}
+CSV_MAX_BYTES = 5 * 1024 * 1024
+CSV_MAX_REPORTED_ERRORS = 20
 
 
 # ── Request models ─────────────────────────────────────────────────────────
 
-class AdminMintRequest(BaseModel):
-    recipient: str
-    reason: str  # Required — every admin action must be justified
-
-class AdminRetireRequest(BaseModel):
-    reason: str
-
-class AdminTransferRequest(BaseModel):
-    new_holder: str
-    reason: str
-
 class DeviceRegistration(BaseModel):
-    device_id: str
+    device_id: str = Field(..., min_length=1, max_length=64)
     owner_email: str
-    location: str
+    location: str = Field(default="India", max_length=120)
+
+    @field_validator("device_id", "owner_email", "location")
+    @classmethod
+    def strip(cls, value: str) -> str:
+        return value.strip()
 
 
-# ── Audit logging helper ──────────────────────────────────────────────────
+# ── Audit logging ──────────────────────────────────────────────────────────
 
-async def log_admin_action(admin_id: int, action: str, target_type: str,
-                            target_id: str, reason: str, details: str = None):
-    """Record every admin action with identity, timestamp, and reason."""
+async def log_admin_action(
+    admin_id: int,
+    action: str,
+    target_type: str,
+    target_id: str,
+    reason: str,
+    details: Optional[str] = None,
+):
+    """Record an administrative action against the audit trail."""
     await db_execute_with_retry(
-        query="""INSERT INTO audit_log (admin_user_id, action, target_type, target_id, reason, details)
+        query="""INSERT INTO audit_log
+                 (admin_user_id, action, target_type, target_id, reason, details)
                  VALUES (:admin_id, :action, :target_type, :target_id, :reason, :details)""",
         values={
             "admin_id": admin_id,
@@ -49,42 +59,46 @@ async def log_admin_action(admin_id: int, action: str, target_type: str,
             "target_id": str(target_id),
             "reason": reason,
             "details": details,
-        }
+        },
     )
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────
+def _paginate(page: int, limit: int, cap: int = 200) -> tuple[int, int, int]:
+    page, limit = max(1, page), max(1, min(limit, cap))
+    return page, limit, (page - 1) * limit
+
+
+# ── Overview ───────────────────────────────────────────────────────────────
 
 @router.get("/overview")
 async def admin_overview(admin: dict = Depends(require_admin)):
-    """Platform-wide overview for admin dashboard."""
+    """Platform-wide counts across users, credits, and transactions."""
     users = await database.fetch_one(
-        query="""SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN role='installer' THEN 1 ELSE 0 END) as installers,
-            SUM(CASE WHEN role='buyer' THEN 1 ELSE 0 END) as buyers,
-            SUM(CASE WHEN role='admin' THEN 1 ELSE 0 END) as admins
-        FROM users"""
+        """SELECT COUNT(*) AS total,
+                  COALESCE(SUM(role = 'installer'), 0) AS installers,
+                  COALESCE(SUM(role = 'buyer'), 0)     AS buyers,
+                  COALESCE(SUM(role = 'admin'), 0)     AS admins
+           FROM users"""
     )
     credits = await database.fetch_one(
-        query="""SELECT
-            COUNT(*) as total,
-            SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,
-            SUM(CASE WHEN status='verified' THEN 1 ELSE 0 END) as verified,
-            SUM(CASE WHEN status='listed' THEN 1 ELSE 0 END) as listed,
-            SUM(CASE WHEN status='reserved' THEN 1 ELSE 0 END) as reserved,
-            SUM(CASE WHEN status='sold' THEN 1 ELSE 0 END) as sold,
-            SUM(CASE WHEN status='retired' THEN 1 ELSE 0 END) as retired,
-            COALESCE(SUM(total_kwh), 0) as total_kwh,
-            COALESCE(SUM(co2_avoided_kg), 0) as total_co2_kg
-        FROM credits"""
+        """SELECT COUNT(*) AS total,
+                  COALESCE(SUM(status = 'pending'), 0)  AS pending,
+                  COALESCE(SUM(status = 'verified'), 0) AS verified,
+                  COALESCE(SUM(status = 'listed'), 0)   AS listed,
+                  COALESCE(SUM(status = 'reserved'), 0) AS reserved,
+                  COALESCE(SUM(status = 'sold'), 0)     AS sold,
+                  COALESCE(SUM(status = 'retired'), 0)  AS retired,
+                  COALESCE(SUM(on_chain_id IS NOT NULL), 0) AS minted,
+                  COALESCE(SUM(total_kwh), 0)           AS total_kwh,
+                  COALESCE(SUM(co2_avoided_kg), 0)      AS total_co2_kg
+           FROM credits"""
     )
     transactions = await database.fetch_one(
-        query="""SELECT
-            COUNT(*) as total,
-            SUM(CASE WHEN payment_status='completed' THEN 1 ELSE 0 END) as completed,
-            COALESCE(SUM(CASE WHEN payment_status='completed' THEN total_amount_inr ELSE 0 END), 0) as total_inr
-        FROM marketplace_transactions"""
+        """SELECT COUNT(*) AS total,
+                  COALESCE(SUM(payment_status = 'completed'), 0) AS completed,
+                  COALESCE(SUM(CASE WHEN payment_status = 'completed'
+                                    THEN total_amount_inr ELSE 0 END), 0) AS total_inr
+           FROM marketplace_transactions"""
     )
 
     return {
@@ -96,14 +110,15 @@ async def admin_overview(admin: dict = Depends(require_admin)):
 
 @router.get("/installers")
 async def list_installers(admin: dict = Depends(require_admin)):
-    """List all installer accounts with their stats."""
+    """Installer accounts with their device and credit counts."""
     installers = await database.fetch_all(
-        query="""SELECT u.id, u.email, u.wallet_address, u.created_at,
-                 (SELECT COUNT(*) FROM credits WHERE owner_user_id = u.id) as credit_count,
-                 (SELECT COUNT(*) FROM devices WHERE owner_user_id = u.id) as device_count,
-                 (SELECT COALESCE(SUM(total_kwh), 0) FROM credits WHERE owner_user_id = u.id) as total_kwh
-                 FROM users u WHERE u.role = 'installer'
-                 ORDER BY u.created_at DESC"""
+        """SELECT u.id, u.email, u.wallet_address, u.created_at,
+                  (SELECT COUNT(*) FROM credits WHERE owner_user_id = u.id) AS credit_count,
+                  (SELECT COUNT(*) FROM devices WHERE owner_user_id = u.id) AS device_count,
+                  (SELECT COALESCE(SUM(total_kwh), 0) FROM credits
+                   WHERE owner_user_id = u.id) AS total_kwh
+           FROM users u WHERE u.role = 'installer'
+           ORDER BY u.created_at DESC"""
     )
     return {"installers": [dict(i) for i in installers]}
 
@@ -114,13 +129,12 @@ async def list_all_credits(
     limit: int = 50,
     status_filter: Optional[str] = None,
     owner_id: Optional[int] = None,
-    admin: dict = Depends(require_admin)
+    admin: dict = Depends(require_admin),
 ):
-    """List all credits with optional filters."""
-    offset = (page - 1) * limit
-    conditions = []
-    values = {"limit": limit, "offset": offset}
+    """The full credit ledger, with optional status and owner filters."""
+    page, limit, offset = _paginate(page, limit, cap=500)
 
+    conditions, values = [], {}
     if status_filter:
         conditions.append("c.status = :status")
         values["status"] = status_filter
@@ -128,325 +142,264 @@ async def list_all_credits(
         conditions.append("c.owner_user_id = :owner_id")
         values["owner_id"] = owner_id
 
-    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     credits = await database.fetch_all(
-        query=f"""SELECT c.*, u.email as owner_email, u.wallet_address as owner_wallet
-                  FROM credits c
-                  LEFT JOIN users u ON c.owner_user_id = u.id
-                  {where}
-                  ORDER BY c.id DESC
-                  LIMIT :limit OFFSET :offset""",
-        values=values
+        query=f"""SELECT c.*, u.email AS owner_email, u.wallet_address AS owner_wallet
+                  FROM credits c LEFT JOIN users u ON c.owner_user_id = u.id
+                  {where} ORDER BY c.credit_id DESC LIMIT :limit OFFSET :offset""",
+        values={**values, "limit": limit, "offset": offset},
     )
-    total = await database.fetch_one(
-        query=f"SELECT COUNT(*) as cnt FROM credits c {where}",
-        values={k: v for k, v in values.items() if k not in ('limit', 'offset')}
+    row = await database.fetch_one(
+        query=f"SELECT COUNT(*) AS cnt FROM credits c {where}", values=values
     )
+    total = row["cnt"] if row else 0
 
     return {
         "credits": [dict(c) for c in credits],
-        "total": dict(total)["cnt"],
+        "total": total,
         "page": page,
-        "pages": max(1, -(-dict(total)["cnt"] // limit)),
-    }
-
-
-@router.get("/transactions")
-async def list_transactions(
-    page: int = 1,
-    limit: int = 50,
-    admin: dict = Depends(require_admin)
-):
-    """List all marketplace transactions."""
-    offset = (page - 1) * limit
-    txns = await database.fetch_all(
-        query="""SELECT mt.*, u.email as buyer_email
-                 FROM marketplace_transactions mt
-                 LEFT JOIN users u ON mt.buyer_user_id = u.id
-                 ORDER BY mt.created_at DESC
-                 LIMIT :limit OFFSET :offset""",
-        values={"limit": limit, "offset": offset}
-    )
-    total = await database.fetch_one(
-        query="SELECT COUNT(*) as cnt FROM marketplace_transactions"
-    )
-    return {
-        "transactions": [dict(t) for t in txns],
-        "total": dict(total)["cnt"],
-        "page": page,
-        "pages": max(1, -(-dict(total)["cnt"] // limit)),
-    }
-
-
-@router.get("/audit-log")
-async def get_audit_log(
-    page: int = 1,
-    limit: int = 50,
-    admin: dict = Depends(require_admin)
-):
-    """View the admin audit trail."""
-    offset = (page - 1) * limit
-    logs = await database.fetch_all(
-        query="""SELECT al.*, u.email as admin_email
-                 FROM audit_log al
-                 LEFT JOIN users u ON al.admin_user_id = u.id
-                 ORDER BY al.created_at DESC
-                 LIMIT :limit OFFSET :offset""",
-        values={"limit": limit, "offset": offset}
-    )
-    total = await database.fetch_one(
-        query="SELECT COUNT(*) as cnt FROM audit_log"
-    )
-    return {
-        "logs": [dict(l) for l in logs],
-        "total": dict(total)["cnt"],
-        "page": page,
-        "pages": max(1, -(-dict(total)["cnt"] // limit)),
+        "pages": max(1, -(-total // limit)),
+        "explorer": config.EXPLORER,
     }
 
 
 @router.get("/credit/{credit_id}")
 async def credit_detail(credit_id: int, admin: dict = Depends(require_admin)):
-    """Full lifecycle view of a single credit (for dispute resolution)."""
+    """A single credit with its full audit history, for dispute resolution."""
     credit = await database.fetch_one(
-        query="""SELECT c.*, u.email as owner_email, 
-                 b.email as buyer_email
+        query="""SELECT c.*, u.email AS owner_email, b.email AS buyer_email
                  FROM credits c
                  LEFT JOIN users u ON c.owner_user_id = u.id
                  LEFT JOIN users b ON c.buyer_user_id = b.id
-                 WHERE c.id = :id""",
-        values={"id": credit_id}
+                 WHERE c.credit_id = :credit_id""",
+        values={"credit_id": credit_id},
     )
     if not credit:
         raise HTTPException(404, f"Credit #{credit_id} not found")
 
-    # Related audit log entries
     audit = await database.fetch_all(
-        query="""SELECT al.*, u.email as admin_email
-                 FROM audit_log al
-                 LEFT JOIN users u ON al.admin_user_id = u.id
+        query="""SELECT al.*, u.email AS admin_email
+                 FROM audit_log al LEFT JOIN users u ON al.admin_user_id = u.id
                  WHERE al.target_type = 'credit' AND al.target_id = :id
                  ORDER BY al.created_at DESC""",
-        values={"id": str(credit_id)}
+        values={"id": str(credit_id)},
     )
 
-    return {
-        "credit": dict(credit),
-        "audit_trail": [dict(a) for a in audit],
-    }
+    return {"credit": dict(credit), "audit_trail": [dict(a) for a in audit]}
 
 
-@router.post("/mint/{credit_id}")
-async def admin_mint(
-    credit_id: int,
-    req: AdminMintRequest,
-    admin: dict = Depends(require_admin)
-):
-    """
-    Manual mint override for admin — wraps the existing mint logic
-    and records an audit log entry with admin identity + reason.
-    """
-    if not req.reason or len(req.reason.strip()) < 5:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="A reason is required for admin overrides (minimum 5 characters)."
-        )
+@router.get("/transactions")
+async def list_transactions(page: int = 1, limit: int = 50, admin: dict = Depends(require_admin)):
+    """All marketplace transactions."""
+    page, limit, offset = _paginate(page, limit, cap=500)
 
-    # Log the action BEFORE attempting — so even failed attempts are audited
-    await log_admin_action(
-        admin_id=admin["id"],
-        action="mint",
-        target_type="credit",
-        target_id=str(credit_id),
-        reason=req.reason,
-        details=f"recipient={req.recipient}"
+    transactions = await database.fetch_all(
+        query="""SELECT mt.*, u.email AS buyer_email
+                 FROM marketplace_transactions mt
+                 LEFT JOIN users u ON mt.buyer_user_id = u.id
+                 ORDER BY mt.created_at DESC LIMIT :limit OFFSET :offset""",
+        values={"limit": limit, "offset": offset},
     )
+    row = await database.fetch_one("SELECT COUNT(*) AS cnt FROM marketplace_transactions")
+    total = row["cnt"] if row else 0
 
-    # Call the actual mint endpoint logic (imported from main)
-    # Note: the actual blockchain call happens in main.py's mint_credit function
-    # For now, we return success — the actual call would be done via internal function
     return {
-        "status": "audit_logged",
-        "message": f"Admin mint for credit #{credit_id} logged. Use POST /mint/{credit_id}?recipient={req.recipient} with admin auth to execute.",
-        "audit": {
-            "admin": admin["email"],
-            "action": "mint",
-            "reason": req.reason,
-            "credit_id": credit_id,
-            "recipient": req.recipient,
-        }
+        "transactions": [dict(t) for t in transactions],
+        "total": total,
+        "page": page,
+        "pages": max(1, -(-total // limit)),
     }
 
 
-@router.post("/retire/{credit_id}")
-async def admin_retire(
-    credit_id: int,
-    req: AdminRetireRequest,
-    admin: dict = Depends(require_admin)
-):
-    """Manual retire override for admin — with audit logging."""
-    if not req.reason or len(req.reason.strip()) < 5:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="A reason is required for admin overrides (minimum 5 characters)."
-        )
+@router.get("/audit-log")
+async def get_audit_log(page: int = 1, limit: int = 50, admin: dict = Depends(require_admin)):
+    """The administrative audit trail."""
+    page, limit, offset = _paginate(page, limit, cap=500)
 
-    await log_admin_action(
-        admin_id=admin["id"],
-        action="retire",
-        target_type="credit",
-        target_id=str(credit_id),
-        reason=req.reason,
+    logs = await database.fetch_all(
+        query="""SELECT al.*, u.email AS admin_email
+                 FROM audit_log al LEFT JOIN users u ON al.admin_user_id = u.id
+                 ORDER BY al.created_at DESC LIMIT :limit OFFSET :offset""",
+        values={"limit": limit, "offset": offset},
     )
+    row = await database.fetch_one("SELECT COUNT(*) AS cnt FROM audit_log")
+    total = row["cnt"] if row else 0
 
     return {
-        "status": "audit_logged",
-        "message": f"Admin retire for credit #{credit_id} logged. Use POST /retire/{credit_id} with admin auth to execute on-chain.",
-        "audit": {
-            "admin": admin["email"],
-            "action": "retire",
-            "reason": req.reason,
-            "credit_id": credit_id,
-        }
+        "logs": [dict(entry) for entry in logs],
+        "total": total,
+        "page": page,
+        "pages": max(1, -(-total // limit)),
     }
 
 
-@router.get("/system-health")
-async def system_health(admin: dict = Depends(require_admin)):
-    """System health check — contract owner, wallet balance, RPC status."""
-    from main import w3, contract, PRIVATE_KEY, CONTRACT_ADDRESS, EXPLORER
-
-    health = {
-        "contract_address": CONTRACT_ADDRESS,
-        "explorer": f"{EXPLORER}/address/{CONTRACT_ADDRESS}",
-    }
-
-    try:
-        account = w3.eth.account.from_key(PRIVATE_KEY)
-        contract_owner = contract.functions.owner().call()
-        balance = w3.eth.get_balance(account.address)
-        total_on_chain = contract.functions.totalCredits().call()
-
-        health.update({
-            "rpc_connected": w3.is_connected(),
-            "chain_id": w3.eth.chain_id,
-            "signing_wallet": account.address,
-            "contract_owner": contract_owner,
-            "is_owner": account.address.lower() == contract_owner.lower(),
-            "wallet_balance_matic": round(w3.from_wei(balance, "ether"), 4),
-            "total_on_chain_credits": total_on_chain,
-            "status": "healthy" if w3.is_connected() and account.address.lower() == contract_owner.lower() else "degraded"
-        })
-    except Exception as e:
-        health.update({
-            "status": "error",
-            "error": str(e),
-        })
-
-    # DB stats
-    try:
-        db_credits = await database.fetch_one("SELECT COUNT(*) as cnt FROM credits")
-        db_users = await database.fetch_one("SELECT COUNT(*) as cnt FROM users")
-        health["db_credits"] = dict(db_credits)["cnt"]
-        health["db_users"] = dict(db_users)["cnt"]
-    except Exception as e:
-        health["db_error"] = str(e)
-
-    return health
+# ── Device registration ────────────────────────────────────────────────────
 
 @router.post("/devices")
 async def register_device(req: DeviceRegistration, admin: dict = Depends(require_admin)):
-    """Register a new device to an existing user."""
-    # Find user by email
-    user = await database.fetch_one("SELECT id FROM users WHERE email = :email", {"email": req.owner_email})
-    if not user:
-        raise HTTPException(404, f"User with email {req.owner_email} not found")
-        
-    try:
-        await database.execute(
-            "INSERT INTO devices (device_id, owner_user_id, location) VALUES (:device_id, :owner_id, :location)",
-            {"device_id": req.device_id, "owner_id": dict(user)["id"], "location": req.location}
-        )
-        await log_admin_action(admin["id"], "register_device", "devices", req.device_id, "CSV Ingestion Setup")
-        return {"status": "success", "message": f"Device {req.device_id} registered to {req.owner_email}"}
-    except Exception as e:
-        if "UNIQUE" in str(e):
-            raise HTTPException(400, "Device ID already exists")
-        raise HTTPException(500, f"Database error: {str(e)}")
+    """Register a generation device against an existing installer account."""
+    owner = await database.fetch_one(
+        "SELECT id, role FROM users WHERE email = :email", {"email": req.owner_email.lower()}
+    )
+    if not owner:
+        raise HTTPException(404, f"No user found with email {req.owner_email}")
+    if owner["role"] != "installer":
+        raise HTTPException(400, "Devices can only be registered to installer accounts.")
+
+    existing = await database.fetch_one(
+        "SELECT id FROM devices WHERE device_id = :device_id", {"device_id": req.device_id}
+    )
+    if existing:
+        raise HTTPException(409, f"Device '{req.device_id}' is already registered.")
+
+    await db_execute_with_retry(
+        query="""INSERT INTO devices (device_id, owner_user_id, location)
+                 VALUES (:device_id, :owner_id, :location)""",
+        values={"device_id": req.device_id, "owner_id": owner["id"], "location": req.location},
+    )
+    await log_admin_action(
+        admin["id"], "register_device", "device", req.device_id,
+        f"Registered to {req.owner_email}",
+    )
+
+    return {
+        "status": "registered",
+        "device_id": req.device_id,
+        "owner_email": req.owner_email,
+        "location": req.location,
+    }
+
+
+# ── CSV ingestion ──────────────────────────────────────────────────────────
 
 @router.post("/ingest-csv")
 async def ingest_csv(file: UploadFile = File(...), admin: dict = Depends(require_admin)):
     """
-    Ingest a CSV of raw readings.
-    Expected CSV columns: device_id, timestamp, delta_kwh
+    Ingest raw generation readings from a CSV of `device_id, timestamp, delta_kwh`.
+
+    Rows are validated in full before anything is written, so a malformed file
+    is rejected rather than partially applied.
     """
     content = await file.read()
-    decoded = content.decode("utf-8")
-    
-    # Python CSV reader
-    csv_reader = csv.DictReader(io.StringIO(decoded))
-    
-    # 1. Validate headers
-    required_headers = {"device_id", "timestamp", "delta_kwh"}
-    if not required_headers.issubset(set(csv_reader.fieldnames or [])):
-        raise HTTPException(400, f"CSV is missing required columns. Expected: {required_headers}")
-        
-    # Pre-fetch all devices
-    devices = await database.fetch_all("SELECT device_id, owner_user_id, location FROM devices")
-    device_map = {d["device_id"]: dict(d) for d in devices}
-    
-    errors = []
-    parsed_readings = []
-    
-    # 2. Parse and validate rows
-    for i, row in enumerate(csv_reader):
-        device_id = row.get("device_id", "").strip()
-        timestamp = row.get("timestamp", "").strip()
-        delta_kwh_str = row.get("delta_kwh", "").strip()
-        
-        if not device_id or not timestamp or not delta_kwh_str:
-            errors.append(f"Row {i+1}: Missing required fields.")
-            continue
-            
-        if device_id not in device_map:
-            errors.append(f"Row {i+1}: Unknown device '{device_id}'. Register it first.")
-            continue
-            
-        try:
-            delta_kwh = float(delta_kwh_str)
-        except ValueError:
-            errors.append(f"Row {i+1}: 'delta_kwh' must be numeric. Found '{delta_kwh_str}'.")
-            continue
-            
-        # Hardcoded conversion rate for this MVP (CEA Grid Emission Factor 0.82)
-        co2_avoided_kg = delta_kwh * 0.82
-        
-        parsed_readings.append({
-            "device_id": device_id,
-            "timestamp": timestamp,
-            "total_kwh": delta_kwh, # For delta logic, total_kwh holds the delta
-            "co2_avoided_kg": co2_avoided_kg,
-            "location": device_map[device_id]["location"],
-            "owner_user_id": device_map[device_id]["owner_user_id"]
-        })
-        
-    if errors:
-        raise HTTPException(400, {"message": "CSV validation failed", "errors": errors})
-        
-    if not parsed_readings:
-        raise HTTPException(400, "CSV contains no data rows")
-        
-    # For now, process_raw_readings expects a single owner_user_id per batch for the accumulation step.
-    # We will pass the owner of the first reading, assuming the CSV is for a single owner/device.
-    # Revisit if multi-owner CSVs are needed.
-    owner_id = parsed_readings[0]["owner_user_id"]
-    
-    inserts, new_credits = await process_raw_readings(parsed_readings, owner_id)
-    
-    await log_admin_action(admin["id"], "ingest_csv", "generation_readings", file.filename, f"Ingested {inserts} readings")
-    
-    return {
-        "status": "success",
-        "message": f"Successfully ingested {inserts} readings, minted {new_credits} new 1-tonne credits."
+    if len(content) > CSV_MAX_BYTES:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            f"CSV exceeds the {CSV_MAX_BYTES // (1024 * 1024)}MB limit.",
+        )
+
+    try:
+        decoded = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "CSV must be UTF-8 encoded.")
+
+    reader = csv.DictReader(io.StringIO(decoded))
+    missing = CSV_REQUIRED_COLUMNS - set(reader.fieldnames or [])
+    if missing:
+        raise HTTPException(400, f"CSV is missing required columns: {', '.join(sorted(missing))}")
+
+    devices = {
+        row["device_id"]: dict(row)
+        for row in await database.fetch_all(
+            "SELECT device_id, owner_user_id, location FROM devices"
+        )
     }
+
+    readings, errors = [], []
+    for line_number, row in enumerate(reader, start=2):  # row 1 is the header
+        device_id = (row.get("device_id") or "").strip()
+        timestamp = (row.get("timestamp") or "").strip()
+        raw_kwh = (row.get("delta_kwh") or "").strip()
+
+        if not (device_id and timestamp and raw_kwh):
+            errors.append(f"Line {line_number}: missing a required value.")
+            continue
+        if device_id not in devices:
+            errors.append(f"Line {line_number}: unknown device '{device_id}' — register it first.")
+            continue
+
+        try:
+            delta_kwh = float(raw_kwh)
+        except ValueError:
+            errors.append(f"Line {line_number}: delta_kwh must be numeric, got '{raw_kwh}'.")
+            continue
+
+        if delta_kwh < 0:
+            errors.append(f"Line {line_number}: delta_kwh cannot be negative.")
+            continue
+
+        device = devices[device_id]
+        readings.append(
+            {
+                "device_id": device_id,
+                "timestamp": timestamp,
+                # For delta ingestion, total_kwh carries the interval's own
+                # generation rather than a running meter total.
+                "total_kwh": delta_kwh,
+                "co2_avoided_kg": delta_kwh * config.EMISSION_FACTOR_KG_PER_KWH,
+                "location": device["location"],
+                "owner_user_id": device["owner_user_id"],
+            }
+        )
+
+    if errors:
+        raise HTTPException(
+            400,
+            {
+                "message": f"CSV validation failed with {len(errors)} error(s). Nothing was imported.",
+                "errors": errors[:CSV_MAX_REPORTED_ERRORS],
+                "truncated": len(errors) > CSV_MAX_REPORTED_ERRORS,
+            },
+        )
+
+    if not readings:
+        raise HTTPException(400, "CSV contains no data rows.")
+
+    inserted, issued = await process_raw_readings(readings, readings[0]["owner_user_id"])
+    await log_admin_action(
+        admin["id"], "ingest_csv", "generation_readings", file.filename or "upload.csv",
+        f"Ingested {inserted} readings", f"issued {issued} credits",
+    )
+
+    return {
+        "status": "ingested",
+        "readings_added": inserted,
+        "rows_processed": len(readings),
+        "credits_issued": issued,
+        "message": f"Added {inserted} reading(s) and issued {issued} new credit(s).",
+    }
+
+
+# ── System health ──────────────────────────────────────────────────────────
+
+@router.get("/system-health")
+async def system_health(admin: dict = Depends(require_admin)):
+    """Contract, RPC, wallet, and database status."""
+    health = {
+        "environment": config.ENVIRONMENT,
+        "contract_address": config.CONTRACT_ADDRESS,
+        "explorer": chain.contract_url(),
+    }
+
+    try:
+        chain_info = await chain.health()
+        health.update(chain_info)
+        health["status"] = (
+            "healthy"
+            if chain_info.get("rpc_connected") and chain_info.get("is_owner")
+            else "degraded"
+        )
+    except Exception as exc:
+        health["status"] = "error"
+        health["chain_error"] = str(exc)
+
+    try:
+        credits = await database.fetch_one("SELECT COUNT(*) AS cnt FROM credits")
+        users = await database.fetch_one("SELECT COUNT(*) AS cnt FROM users")
+        health["db_credits"] = credits["cnt"]
+        health["db_users"] = users["cnt"]
+    except Exception as exc:
+        health["status"] = "error"
+        health["db_error"] = str(exc)
+
+    return health

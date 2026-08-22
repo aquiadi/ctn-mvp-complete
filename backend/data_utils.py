@@ -1,47 +1,44 @@
-def parse_discrete_credits(raw_credits):
-    """
-    Takes an array of raw cumulative credits from IPFS, 
-    groups them by device_id, sorts chronologically, and computes
-    discrete delta values (clamped to >= 0) for each credit.
-    Returns a flat list of parsed discrete credits, sorted by credit_id.
-    """
-    if not raw_credits:
-        return []
+"""
+Helpers for normalising externally supplied generation data.
+"""
 
-    # Group by device_id
-    grouped = {}
-    for c in raw_credits:
-        device_id = c.get("device_id", "unknown")
-        if device_id not in grouped:
-            grouped[device_id] = []
-        grouped[device_id].append(c)
-    
-    parsed = []
-    
-    for device_id, group in grouped.items():
-        # Sort strictly by timestamp within each device
-        group.sort(key=lambda x: x.get("timestamp", ""))
-        
-        prev_kwh = 0.0
-        prev_co2 = 0.0
-        
-        for c in group:
-            cum_kwh = float(c.get("total_kwh", 0))
-            cum_co2 = float(c.get("co2_avoided_kg", 0))
-            
-            # Compute delta and clamp to 0
-            delta_kwh = max(0.0, cum_kwh - prev_kwh)
-            delta_co2 = max(0.0, cum_co2 - prev_co2)
-            
-            prev_kwh = cum_kwh
-            prev_co2 = cum_co2
-            
-            # Create a copy so we don't mutate the original if it's cached differently
-            parsed_c = c.copy()
-            parsed_c["total_kwh"] = delta_kwh
-            parsed_c["co2_avoided_kg"] = delta_co2
-            parsed.append(parsed_c)
-            
-    # Return the full list sorted back by credit_id
-    parsed.sort(key=lambda x: x.get("credit_id", 0))
-    return parsed
+from typing import Iterable
+
+
+def to_discrete_readings(raw: Iterable[dict]) -> list[dict]:
+    """
+    Convert cumulative meter readings into per-interval deltas.
+
+    The published seed dataset reports running totals per device, so consecutive
+    entries must be differenced before they can be accumulated into credits —
+    otherwise every reading would be counted again from zero.
+
+    Readings are grouped by device and ordered by timestamp. Deltas are clamped
+    at zero so a meter reset or an out-of-order sample cannot subtract from the
+    running total.
+    """
+    by_device: dict[str, list[dict]] = {}
+    for entry in raw or []:
+        by_device.setdefault(entry.get("device_id", "unknown"), []).append(entry)
+
+    readings: list[dict] = []
+    for device_entries in by_device.values():
+        device_entries.sort(key=lambda e: e.get("timestamp", ""))
+
+        previous_kwh = 0.0
+        previous_co2 = 0.0
+
+        for entry in device_entries:
+            cumulative_kwh = float(entry.get("total_kwh", 0) or 0)
+            cumulative_co2 = float(entry.get("co2_avoided_kg", 0) or 0)
+
+            reading = dict(entry)
+            reading["total_kwh"] = max(0.0, cumulative_kwh - previous_kwh)
+            reading["co2_avoided_kg"] = max(0.0, cumulative_co2 - previous_co2)
+            readings.append(reading)
+
+            previous_kwh = cumulative_kwh
+            previous_co2 = cumulative_co2
+
+    readings.sort(key=lambda r: (r.get("device_id", ""), r.get("timestamp", "")))
+    return readings

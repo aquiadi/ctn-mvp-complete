@@ -1,104 +1,93 @@
 """
-CTN Installer Routes — dashboard, credits, devices, sell, history.
-All routes scoped to the authenticated installer's own data.
+CTN Installer routes — dashboard, credits, readings, devices, listing, history.
+
+Every query is scoped to the authenticated installer's own records.
 """
 
 import time
-from fastapi import APIRouter, HTTPException, Depends, status
-from pydantic import BaseModel
 from typing import List, Optional
 
-from database import database, db_execute_with_retry
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+
+import config
 from auth import require_installer
+from database import database
 
 router = APIRouter(prefix="/api/installer", tags=["installer"])
 
-# ── Config ─────────────────────────────────────────────────────────────────
+VALID_STATUSES = {"pending", "verified", "listed", "reserved", "sold", "retired"}
 
-CREDIT_VALUE_USD = 5.0
-INR_RATE = 83
-SELL_THRESHOLD = 1  # MVP threshold — 1 tonne. Revisit for production (e.g. 10+ tonnes).
-
-
-# ── Request models ─────────────────────────────────────────────────────────
 
 class SellRequest(BaseModel):
-    credit_ids: List[int]  # DB ids of credits to list
+    credit_ids: List[int] = Field(..., min_length=1, max_length=1000)
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────
+def _paginate(page: int, limit: int, cap: int = 200) -> tuple[int, int, int]:
+    page, limit = max(1, page), max(1, min(limit, cap))
+    return page, limit, (page - 1) * limit
+
 
 @router.get("/dashboard")
 async def installer_dashboard(user: dict = Depends(require_installer)):
-    """
-    Installer's own dashboard stats — scoped to their credits only.
-    Returns generation data, credit counts by status, and sell-threshold progress.
-    """
+    """Generation totals, credit counts by status, and progress toward listing."""
     user_id = user["id"]
 
-    # Aggregate stats for this installer
-    stats = await database.fetch_one(
-        query="""SELECT 
-            COALESCE(SUM(total_kwh), 0) as total_kwh,
-            COALESCE(SUM(co2_avoided_kg), 0) as total_co2_kg,
-            COUNT(*) as total_credits,
-            MIN(period_start) as period_start,
-            MAX(period_end) as period_end
-        FROM credits WHERE owner_user_id = :user_id""",
-        values={"user_id": user_id}
+    totals = dict(
+        await database.fetch_one(
+            query="""SELECT COALESCE(SUM(total_kwh), 0)      AS total_kwh,
+                            COALESCE(SUM(co2_avoided_kg), 0) AS total_co2_kg,
+                            COUNT(*)                         AS total_credits,
+                            MIN(period_start)                AS period_start,
+                            MAX(period_end)                  AS period_end
+                     FROM credits WHERE owner_user_id = :user_id""",
+            values={"user_id": user_id},
+        )
     )
 
-    # Credits by status
-    status_counts = await database.fetch_all(
-        query="""SELECT status, COUNT(*) as count 
-                 FROM credits WHERE owner_user_id = :user_id 
-                 GROUP BY status""",
-        values={"user_id": user_id}
+    status_rows = await database.fetch_all(
+        query="""SELECT status, COUNT(*) AS count FROM credits
+                 WHERE owner_user_id = :user_id GROUP BY status""",
+        values={"user_id": user_id},
     )
-    by_status = {row["status"]: row["count"] for row in status_counts}
+    by_status = {row["status"]: row["count"] for row in status_rows}
+    verified = by_status.get("verified", 0)
 
-    verified_count = by_status.get("verified", 0)
-    total_credits = dict(stats)["total_credits"]
-    total_kwh = dict(stats)["total_kwh"]
-    total_co2 = dict(stats)["total_co2_kg"]
-
-    # Devices
     devices = await database.fetch_all(
         query="SELECT device_id, location FROM devices WHERE owner_user_id = :user_id",
-        values={"user_id": user_id}
+        values={"user_id": user_id},
     )
+
+    total_credits = totals["total_credits"]
 
     return {
         "installer": {
             "id": user["id"],
             "email": user["email"],
             "wallet_address": user["wallet_address"],
-            "wallet_linked": user["wallet_address"] is not None,
+            "wallet_linked": bool(user["wallet_address"]),
         },
         "stats": {
-            "total_kwh": round(total_kwh, 2),
-            "total_co2_kg": round(total_co2, 2),
-            "total_co2_tonnes": round(total_co2 / 1000, 3),
+            "total_kwh": round(totals["total_kwh"], 2),
+            "total_co2_kg": round(totals["total_co2_kg"], 2),
+            "total_co2_tonnes": round(totals["total_co2_kg"] / 1000, 3),
             "total_credits": total_credits,
-            "value_usd": round(total_credits * CREDIT_VALUE_USD, 2),
-            "value_inr": round(total_credits * CREDIT_VALUE_USD * INR_RATE, 2),
-            "period_start": dict(stats)["period_start"],
-            "period_end": dict(stats)["period_end"],
+            "value_usd": round(total_credits * config.CREDIT_VALUE_USD, 2),
+            "value_inr": round(total_credits * config.CREDIT_VALUE_INR, 2),
+            "period_start": totals["period_start"],
+            "period_end": totals["period_end"],
         },
-        "credits_by_status": {
-            "pending": by_status.get("pending", 0),
-            "verified": verified_count,
-            "listed": by_status.get("listed", 0),
-            "reserved": by_status.get("reserved", 0),
-            "sold": by_status.get("sold", 0),
-            "retired": by_status.get("retired", 0),
-        },
+        "credits_by_status": {name: by_status.get(name, 0) for name in sorted(VALID_STATUSES)},
         "sell_threshold": {
-            "required": SELL_THRESHOLD,
-            "current": verified_count,
-            "eligible": verified_count >= SELL_THRESHOLD,
-            "remaining": max(0, SELL_THRESHOLD - verified_count),
-            "progress_pct": round(min(100, (verified_count / SELL_THRESHOLD) * 100), 1),
+            "required": config.SELL_THRESHOLD,
+            "current": verified,
+            "eligible": verified >= config.SELL_THRESHOLD,
+            "remaining": max(0, config.SELL_THRESHOLD - verified),
+            "progress_pct": round(min(100, verified / config.SELL_THRESHOLD * 100), 1),
+        },
+        "pricing": {
+            "price_per_credit_usd": config.CREDIT_VALUE_USD,
+            "price_per_credit_inr": config.CREDIT_VALUE_INR,
         },
         "devices": [dict(d) for d in devices],
     }
@@ -109,95 +98,85 @@ async def installer_credits(
     page: int = 1,
     limit: int = 20,
     status_filter: Optional[str] = None,
-    user: dict = Depends(require_installer)
+    user: dict = Depends(require_installer),
 ):
-    """Paginated list of this installer's credits with optional status filter."""
-    user_id = user["id"]
-    offset = (page - 1) * limit
+    """This installer's credits, optionally filtered by lifecycle status."""
+    page, limit, offset = _paginate(page, limit, cap=1000)
 
+    if status_filter and status_filter not in VALID_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown status '{status_filter}'. Expected one of: "
+                   f"{', '.join(sorted(VALID_STATUSES))}.",
+        )
+
+    where = "owner_user_id = :user_id"
+    values = {"user_id": user["id"]}
     if status_filter:
-        credits = await database.fetch_all(
-            query="""SELECT id, credit_id, device_id, total_kwh, co2_avoided_kg,
-                     period_start, period_end, status, on_chain_id,
-                     ipfs_hash, tx_hash, listed_at, sold_at
-                     FROM credits 
-                     WHERE owner_user_id = :user_id AND status = :status
-                     ORDER BY credit_id DESC
-                     LIMIT :limit OFFSET :offset""",
-            values={"user_id": user_id, "status": status_filter, "limit": limit, "offset": offset}
-        )
-        total = await database.fetch_one(
-            query="SELECT COUNT(*) as cnt FROM credits WHERE owner_user_id = :user_id AND status = :status",
-            values={"user_id": user_id, "status": status_filter}
-        )
-    else:
-        credits = await database.fetch_all(
-            query="""SELECT id, credit_id, device_id, total_kwh, co2_avoided_kg,
-                     period_start, period_end, status, on_chain_id,
-                     ipfs_hash, tx_hash, listed_at, sold_at
-                     FROM credits 
-                     WHERE owner_user_id = :user_id
-                     ORDER BY credit_id DESC
-                     LIMIT :limit OFFSET :offset""",
-            values={"user_id": user_id, "limit": limit, "offset": offset}
-        )
-        total = await database.fetch_one(
-            query="SELECT COUNT(*) as cnt FROM credits WHERE owner_user_id = :user_id",
-            values={"user_id": user_id}
-        )
+        where += " AND status = :status"
+        values["status"] = status_filter
 
-    total_count = dict(total)["cnt"]
+    credits = await database.fetch_all(
+        query=f"""SELECT id, credit_id, device_id, total_kwh, co2_avoided_kg,
+                         period_start, period_end, status, on_chain_id,
+                         ipfs_hash, tx_hash, listed_at, sold_at, retired_at
+                  FROM credits WHERE {where}
+                  ORDER BY credit_id DESC LIMIT :limit OFFSET :offset""",
+        values={**values, "limit": limit, "offset": offset},
+    )
+    row = await database.fetch_one(
+        query=f"SELECT COUNT(*) AS cnt FROM credits WHERE {where}", values=values
+    )
+    total = row["cnt"] if row else 0
 
     return {
         "credits": [dict(c) for c in credits],
-        "total": total_count,
+        "total": total,
         "page": page,
-        "pages": max(1, -(-total_count // limit)),
+        "pages": max(1, -(-total // limit)),
     }
 
 
 @router.get("/readings")
 async def installer_readings(
-    page: int = 1,
-    limit: int = 20,
-    user: dict = Depends(require_installer)
+    page: int = 1, limit: int = 20, user: dict = Depends(require_installer)
 ):
-    """Paginated list of raw generation readings (15-min intervals)."""
-    user_id = user["id"]
-    offset = (page - 1) * limit
+    """Raw generation readings recorded for this installer's devices."""
+    page, limit, offset = _paginate(page, limit)
 
     readings = await database.fetch_all(
         query="""SELECT reading_id, device_id, total_kwh, co2_avoided_kg,
-                 timestamp, signature
-                 FROM generation_readings 
-                 WHERE owner_user_id = :user_id
-                 ORDER BY timestamp DESC
-                 LIMIT :limit OFFSET :offset""",
-        values={"user_id": user_id, "limit": limit, "offset": offset}
+                        timestamp, signature, consumed_by_credit_id
+                 FROM generation_readings WHERE owner_user_id = :user_id
+                 ORDER BY timestamp DESC LIMIT :limit OFFSET :offset""",
+        values={"user_id": user["id"], "limit": limit, "offset": offset},
     )
-    total = await database.fetch_one(
-        query="SELECT COUNT(*) as cnt FROM generation_readings WHERE owner_user_id = :user_id",
-        values={"user_id": user_id}
+    row = await database.fetch_one(
+        "SELECT COUNT(*) AS cnt FROM generation_readings WHERE owner_user_id = :user_id",
+        {"user_id": user["id"]},
     )
-
-    total_count = dict(total)["cnt"]
+    total = row["cnt"] if row else 0
 
     return {
         "readings": [dict(r) for r in readings],
-        "total": total_count,
+        "total": total,
         "page": page,
-        "pages": max(1, -(-total_count // limit)),
+        "pages": max(1, -(-total // limit)),
     }
+
 
 @router.get("/devices")
 async def installer_devices(user: dict = Depends(require_installer)):
-    """List this installer's registered devices."""
+    """Registered devices with their contribution to date."""
     devices = await database.fetch_all(
         query="""SELECT d.id, d.device_id, d.location, d.created_at,
-                 (SELECT COUNT(*) FROM credits WHERE device_id = d.device_id AND owner_user_id = :user_id) as credit_count,
-                 (SELECT COALESCE(SUM(total_kwh), 0) FROM credits WHERE device_id = d.device_id AND owner_user_id = :user_id) as total_kwh
-                 FROM devices d WHERE d.owner_user_id = :user_id""",
-        values={"user_id": user["id"]}
+                        (SELECT COUNT(*) FROM credits
+                         WHERE device_id = d.device_id AND owner_user_id = :user_id) AS credit_count,
+                        (SELECT COALESCE(SUM(total_kwh), 0) FROM credits
+                         WHERE device_id = d.device_id AND owner_user_id = :user_id) AS total_kwh
+                 FROM devices d WHERE d.owner_user_id = :user_id
+                 ORDER BY d.created_at DESC""",
+        values={"user_id": user["id"]},
     )
     return {"devices": [dict(d) for d in devices]}
 
@@ -205,98 +184,94 @@ async def installer_devices(user: dict = Depends(require_installer)):
 @router.post("/sell")
 async def list_credits_for_sale(req: SellRequest, user: dict = Depends(require_installer)):
     """
-    List credits for sale on the marketplace.
-    Requirements: wallet must be linked, credits must be verified, count >= threshold.
+    Put verified credits on the marketplace.
+
+    Requires a linked wallet: the proceeds and eventual on-chain custody are
+    tied to an address the installer has proven they control.
     """
-    # Check wallet linked
     if not user["wallet_address"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="You must link a wallet address before selling credits. Go to Settings → Link Wallet."
+            detail="Link a wallet before listing credits for sale.",
         )
 
-    if len(req.credit_ids) < SELL_THRESHOLD:
+    credit_ids = list(dict.fromkeys(req.credit_ids))
+    if len(credit_ids) < config.SELL_THRESHOLD:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Minimum {SELL_THRESHOLD} credits required to list for sale. You selected {len(req.credit_ids)}."
+            detail=f"At least {config.SELL_THRESHOLD} credit(s) must be listed at once. "
+                   f"You selected {len(credit_ids)}.",
         )
 
-    # Verify all credits belong to this installer and are in 'verified' status
-    placeholders = ", ".join([f":id{i}" for i in range(len(req.credit_ids))])
-    values = {f"id{i}": cid for i, cid in enumerate(req.credit_ids)}
-    values["user_id"] = user["id"]
+    keys = [f"id{i}" for i in range(len(credit_ids))]
+    placeholders = ", ".join(f":{k}" for k in keys)
+    values = {**dict(zip(keys, credit_ids)), "user_id": user["id"]}
 
-    owned_credits = await database.fetch_all(
-        query=f"""SELECT id, status FROM credits 
-                  WHERE id IN ({placeholders}) AND owner_user_id = :user_id""",
-        values=values
-    )
-
-    if len(owned_credits) != len(req.credit_ids):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Some of the selected credits don't belong to your account."
+    async with database.transaction():
+        owned = await database.fetch_all(
+            query=f"""SELECT id, status FROM credits
+                      WHERE id IN ({placeholders}) AND owner_user_id = :user_id""",
+            values=values,
         )
 
-    non_verified = [dict(c) for c in owned_credits if dict(c)["status"] != "verified"]
-    if non_verified:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"{len(non_verified)} credit(s) are not in 'verified' status and cannot be listed."
-        )
+        if len(owned) != len(credit_ids):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Some of the selected credits don't belong to your account.",
+            )
 
-    # Update status to 'listed'
-    now = time.time()
-    for credit_id in req.credit_ids:
-        await db_execute_with_retry(
-            query="UPDATE credits SET status = 'listed', listed_at = :now WHERE id = :id",
-            values={"now": now, "id": credit_id}
+        not_verified = [row["id"] for row in owned if row["status"] != "verified"]
+        if not_verified:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{len(not_verified)} credit(s) are not in 'verified' status "
+                       "and cannot be listed.",
+            )
+
+        await database.execute(
+            query=f"""UPDATE credits SET status = 'listed', listed_at = :now
+                      WHERE id IN ({placeholders}) AND owner_user_id = :user_id
+                        AND status = 'verified'""",
+            values={**values, "now": time.time()},
         )
 
     return {
         "status": "listed",
-        "credits_listed": len(req.credit_ids),
-        "price_per_credit_usd": CREDIT_VALUE_USD,
-        "price_per_credit_inr": CREDIT_VALUE_USD * INR_RATE,
-        "total_value_inr": len(req.credit_ids) * CREDIT_VALUE_USD * INR_RATE,
-        "message": f"{len(req.credit_ids)} credits listed for sale on the marketplace."
+        "credits_listed": len(credit_ids),
+        "price_per_credit_usd": config.CREDIT_VALUE_USD,
+        "price_per_credit_inr": config.CREDIT_VALUE_INR,
+        "total_value_inr": round(len(credit_ids) * config.CREDIT_VALUE_INR, 2),
+        "message": f"{len(credit_ids)} credit(s) listed on the marketplace.",
     }
 
 
 @router.get("/history")
 async def installer_history(
-    page: int = 1,
-    limit: int = 20,
-    user: dict = Depends(require_installer)
+    page: int = 1, limit: int = 20, user: dict = Depends(require_installer)
 ):
-    """Transaction/payout history for this installer."""
-    offset = (page - 1) * limit
+    """Credits that have been sold or retired, with cumulative earnings."""
+    page, limit, offset = _paginate(page, limit)
 
-    # Credits that have been sold
     sold = await database.fetch_all(
         query="""SELECT id, credit_id, total_kwh, co2_avoided_kg, status,
-                 sold_at, buyer_user_id, tx_hash
-                 FROM credits 
+                        sold_at, buyer_user_id, tx_hash, on_chain_id
+                 FROM credits
                  WHERE owner_user_id = :user_id AND status IN ('sold', 'retired')
-                 ORDER BY sold_at DESC
-                 LIMIT :limit OFFSET :offset""",
-        values={"user_id": user["id"], "limit": limit, "offset": offset}
+                 ORDER BY sold_at DESC LIMIT :limit OFFSET :offset""",
+        values={"user_id": user["id"], "limit": limit, "offset": offset},
     )
-
-    total = await database.fetch_one(
-        query="""SELECT COUNT(*) as cnt FROM credits 
-                 WHERE owner_user_id = :user_id AND status IN ('sold', 'retired')""",
-        values={"user_id": user["id"]}
+    row = await database.fetch_one(
+        """SELECT COUNT(*) AS cnt FROM credits
+           WHERE owner_user_id = :user_id AND status IN ('sold', 'retired')""",
+        {"user_id": user["id"]},
     )
-
-    total_count = dict(total)["cnt"]
-    total_earned = total_count * CREDIT_VALUE_USD * INR_RATE
+    total = row["cnt"] if row else 0
 
     return {
         "transactions": [dict(s) for s in sold],
-        "total": total_count,
+        "total": total,
         "page": page,
-        "pages": max(1, -(-total_count // limit)),
-        "total_earned_inr": total_earned,
-        "total_earned_usd": total_count * CREDIT_VALUE_USD,
+        "pages": max(1, -(-total // limit)),
+        "total_earned_usd": round(total * config.CREDIT_VALUE_USD, 2),
+        "total_earned_inr": round(total * config.CREDIT_VALUE_INR, 2),
     }

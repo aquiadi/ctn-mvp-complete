@@ -1,22 +1,29 @@
 """
-CTN Database — SQLite setup, schema, retry wrapper, and seeding.
+CTN database — connection, schema, retry helpers, reading aggregation, seeding.
+
+Raw solar readings land in `generation_readings`. They accumulate per device
+until one tonne of avoided CO2 has been reached, at which point a discrete
+credit is issued in `credits` and the contributing readings are marked consumed
+so re-ingesting the same data is a no-op.
 """
 
-import os
 import asyncio
-import json
 import hashlib
-import time
+import json
+from typing import Iterable, Optional
+
+import aiosqlite
 from databases import Database
 from passlib.context import CryptContext
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ctn_v3.db")
-if "sqlite" in DATABASE_URL and ("ctn.db" in DATABASE_URL or "ctn_v2.db" in DATABASE_URL):
-    DATABASE_URL = DATABASE_URL.replace("ctn.db", "ctn_v3.db").replace("ctn_v2.db", "ctn_v3.db")
+import config
+
+DATABASE_URL = config.DATABASE_URL
 DB_PATH = DATABASE_URL.replace("sqlite:///", "")
 
 database = Database(DATABASE_URL)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 
 # ── Schema ─────────────────────────────────────────────────────────────────
 
@@ -47,8 +54,8 @@ CREATE TABLE IF NOT EXISTS generation_readings (
     total_kwh REAL NOT NULL DEFAULT 0,
     co2_avoided_kg REAL NOT NULL DEFAULT 0,
     timestamp TEXT,
-    methodology TEXT DEFAULT 'CEA Grid Emission Factor 0.82 kg/kWh',
-    standard TEXT DEFAULT 'CTN-SOLAR-V1',
+    methodology TEXT,
+    standard TEXT,
     location TEXT DEFAULT 'India',
     signature TEXT,
     credit_id INTEGER REFERENCES credits(id),
@@ -65,15 +72,18 @@ CREATE TABLE IF NOT EXISTS credits (
     co2_avoided_kg REAL NOT NULL DEFAULT 1000,
     period_start TEXT,
     period_end TEXT,
-    methodology TEXT DEFAULT 'CEA Grid Emission Factor 0.82 kg/kWh',
-    standard TEXT DEFAULT 'CTN-SOLAR-V1',
+    methodology TEXT,
+    standard TEXT,
     location TEXT DEFAULT 'India',
-    contributing_readings TEXT, -- JSON array of reading_ids
+    contributing_readings TEXT, -- JSON array of {reading_id, signature, id}
     status TEXT NOT NULL DEFAULT 'verified'
         CHECK (status IN ('pending', 'verified', 'listed', 'reserved', 'sold', 'retired')),
     on_chain_id INTEGER,
     ipfs_hash TEXT,
     tx_hash TEXT,
+    minted_at REAL,
+    retired_at REAL,
+    retire_tx_hash TEXT,
     listed_at REAL,
     reserved_by INTEGER REFERENCES users(id),
     reserved_at REAL,
@@ -122,287 +132,384 @@ CREATE INDEX IF NOT EXISTS idx_credits_owner ON credits(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_credits_status ON credits(status);
 CREATE INDEX IF NOT EXISTS idx_credits_device ON credits(device_id);
 CREATE INDEX IF NOT EXISTS idx_credits_reserved ON credits(reserved_by, reserved_at);
+CREATE INDEX IF NOT EXISTS idx_credits_on_chain ON credits(on_chain_id);
+CREATE INDEX IF NOT EXISTS idx_readings_owner ON generation_readings(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_readings_unconsumed ON generation_readings(consumed_by_credit_id);
 CREATE INDEX IF NOT EXISTS idx_audit_admin ON audit_log(admin_user_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_buyer ON marketplace_transactions(buyer_user_id);
 """
 
-# ── Retry wrapper for SQLite write contention ──────────────────────────────
+# Columns added after the initial release. SQLite has no "ADD COLUMN IF NOT
+# EXISTS", so existing databases are upgraded by inspecting the table first.
+MIGRATIONS = {
+    "credits": {
+        "on_chain_id": "INTEGER",
+        "ipfs_hash": "TEXT",
+        "tx_hash": "TEXT",
+        "minted_at": "REAL",
+        "retired_at": "REAL",
+        "retire_tx_hash": "TEXT",
+    },
+}
 
-async def db_execute_with_retry(query, values=None, retries=3):
+
+# ── Retry helpers ──────────────────────────────────────────────────────────
+
+_RETRY_DELAYS = (0.05, 0.1, 0.2)
+
+
+async def _with_lock_retry(operation, query, values):
     """
-    Execute a write query with exponential backoff retry on 'database is locked'.
-    Delays: 50ms, 100ms, 200ms.
+    Run a database operation, retrying with backoff while SQLite reports the
+    file as locked. Any other error propagates immediately.
     """
-    delays = [0.05, 0.1, 0.2]
-    last_error = None
-    for attempt in range(retries + 1):
+    for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
         try:
             if values is not None:
-                return await database.execute(query=query, values=values)
-            else:
-                return await database.execute(query=query)
-        except Exception as e:
-            if "database is locked" in str(e).lower() and attempt < retries:
-                last_error = e
-                await asyncio.sleep(delays[attempt])
-            else:
+                return await operation(query=query, values=values)
+            return await operation(query=query)
+        except Exception as exc:
+            if delay is None or "database is locked" not in str(exc).lower():
                 raise
-    raise last_error
+            await asyncio.sleep(delay)
 
 
-async def db_fetch_with_retry(query, values=None, retries=3):
-    """Fetch rows with retry on lock."""
-    delays = [0.05, 0.1, 0.2]
-    last_error = None
-    for attempt in range(retries + 1):
-        try:
-            if values is not None:
-                return await database.fetch_all(query=query, values=values)
-            else:
-                return await database.fetch_all(query=query)
-        except Exception as e:
-            if "database is locked" in str(e).lower() and attempt < retries:
-                last_error = e
-                await asyncio.sleep(delays[attempt])
-            else:
-                raise
-    raise last_error
+async def db_execute_with_retry(query, values=None):
+    """Execute a write, retrying briefly on lock contention."""
+    return await _with_lock_retry(database.execute, query, values)
 
 
-# ── Init and seeding ───────────────────────────────────────────────────────
+async def db_fetch_with_retry(query, values=None):
+    """Fetch rows, retrying briefly on lock contention."""
+    return await _with_lock_retry(database.fetch_all, query, values)
 
-async def init_db():
-    """Create tables and seed initial data if needed."""
-    await database.connect()
 
-    # Use raw aiosqlite for DDL — the `databases` library misinterprets
-    # the % in strftime('%s','now') defaults as format-string placeholders.
-    import aiosqlite
+# ── Schema management ──────────────────────────────────────────────────────
+
+async def _apply_schema():
+    """
+    Create tables and add any columns missing from an older database.
+
+    DDL runs through raw aiosqlite because the `databases` query compiler treats
+    the % in strftime('%s','now') defaults as a parameter placeholder.
+    """
     async with aiosqlite.connect(DB_PATH) as raw_db:
         await raw_db.executescript(SCHEMA_SQL)
+
+        for table, columns in MIGRATIONS.items():
+            cursor = await raw_db.execute(f"PRAGMA table_info({table})")
+            existing = {row[1] for row in await cursor.fetchall()}
+            for column, column_type in columns.items():
+                if column not in existing:
+                    await raw_db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+                    print(f"✓ Added column {table}.{column}")
+
         await raw_db.commit()
 
-    # Seed admin account from env vars
-    admin_email = os.getenv("ADMIN_EMAIL", "admin@ctn.org")
-    admin_password = os.getenv("ADMIN_PASSWORD", "ctn-admin-2024")
 
-    existing_admin = await database.fetch_one(
-        query="SELECT id FROM users WHERE email = :email",
-        values={"email": admin_email}
-    )
-    if not existing_admin:
+# ── Credit issuance ────────────────────────────────────────────────────────
+
+def _reading_fingerprint(reading: dict) -> str:
+    """
+    Deterministic identifier for a reading. Providers that supply their own
+    reading_id keep it; otherwise device and timestamp identify the sample, so
+    re-ingesting the same CSV cannot create duplicates.
+    """
+    supplied = str(reading.get("reading_id", "") or "")
+    if supplied:
+        return supplied
+
+    basis = f"{reading.get('device_id')}_{reading.get('timestamp')}"
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def _sign_reading(reading: dict) -> str:
+    """Hash the canonical form of a reading so later tampering is detectable."""
+    return hashlib.sha256(json.dumps(reading, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+async def _next_credit_id() -> int:
+    """
+    Allocate the next public credit number.
+
+    Derived from the current maximum rather than a row count, so deleting a
+    credit cannot produce an id that collides with an existing one.
+    """
+    row = await database.fetch_one("SELECT COALESCE(MAX(credit_id), 0) AS max_id FROM credits")
+    return (row["max_id"] if row else 0) + 1
+
+
+async def _insert_readings(readings: Iterable[dict], owner_user_id: int) -> int:
+    """Insert readings that aren't already stored. Returns the number added."""
+    existing = {
+        row["reading_id"]
+        for row in await database.fetch_all("SELECT reading_id FROM generation_readings")
+    }
+
+    inserted = 0
+    for reading in readings:
+        fingerprint = _reading_fingerprint(reading)
+        if fingerprint in existing:
+            continue
+
+        canonical = {
+            "device_id": reading.get("device_id"),
+            "timestamp": reading.get("timestamp"),
+            "total_kwh": reading.get("total_kwh", 0),
+            "co2_avoided_kg": reading.get("co2_avoided_kg", 0),
+            "methodology": config.METHODOLOGY,
+            "standard": config.STANDARD,
+            "location": reading.get("location", "India"),
+        }
+
         await database.execute(
-            query="""INSERT INTO users (email, password_hash, role) 
-                     VALUES (:email, :password_hash, :role)""",
+            query="""INSERT INTO generation_readings
+                (reading_id, device_id, owner_user_id, total_kwh, co2_avoided_kg,
+                 timestamp, methodology, standard, location, signature)
+                VALUES (:reading_id, :device_id, :owner_user_id, :total_kwh, :co2_avoided_kg,
+                        :timestamp, :methodology, :standard, :location, :signature)""",
             values={
-                "email": admin_email,
-                "password_hash": pwd_context.hash(admin_password),
-                "role": "admin"
-            }
+                "reading_id": fingerprint,
+                "owner_user_id": reading.get("owner_user_id", owner_user_id),
+                "signature": _sign_reading(canonical),
+                **canonical,
+            },
         )
-        print(f"✓ Seeded admin account: {admin_email}")
+        existing.add(fingerprint)
+        inserted += 1
 
-    # Seed demo installer account
-    demo_email = "demo@installer.ctn"
-    existing_demo = await database.fetch_one(
-        query="SELECT id FROM users WHERE email = :email",
-        values={"email": demo_email}
+    return inserted
+
+
+async def _issue_credit(
+    device_id: str,
+    owner_user_id: int,
+    total_kwh: float,
+    period_start: str,
+    period_end: str,
+    location: str,
+    contributing: list[dict],
+) -> int:
+    """Create one discrete credit and mark its contributing readings consumed."""
+    from ipfs_utils import upload_credit_to_ipfs
+
+    credit_id = await _next_credit_id()
+    certificate = {
+        "credit_id": credit_id,
+        "device_id": device_id,
+        "owner_user_id": owner_user_id,
+        "total_kwh": total_kwh,
+        "co2_avoided_kg": config.KG_CO2_PER_CREDIT,
+        "period_start": period_start,
+        "period_end": period_end,
+        "methodology": config.METHODOLOGY,
+        "standard": config.STANDARD,
+        "location": location,
+        "contributing_readings": contributing,
+    }
+
+    row_id = await database.execute(
+        query="""INSERT INTO credits
+            (credit_id, device_id, owner_user_id, total_kwh, co2_avoided_kg,
+             period_start, period_end, methodology, standard, location,
+             status, contributing_readings, ipfs_hash)
+            VALUES (:credit_id, :device_id, :owner_user_id, :total_kwh, :co2_avoided_kg,
+                    :period_start, :period_end, :methodology, :standard, :location,
+                    'verified', :contributing_readings, :ipfs_hash)""",
+        values={
+            "credit_id": credit_id,
+            "device_id": device_id,
+            "owner_user_id": owner_user_id,
+            "total_kwh": total_kwh,
+            "co2_avoided_kg": config.KG_CO2_PER_CREDIT,
+            "period_start": period_start,
+            "period_end": period_end,
+            "methodology": config.METHODOLOGY,
+            "standard": config.STANDARD,
+            "location": location,
+            "contributing_readings": json.dumps(contributing),
+            "ipfs_hash": upload_credit_to_ipfs(certificate),
+        },
     )
-    demo_user_id = None
-    if not existing_demo:
-        demo_user_id = await database.execute(
-            query="""INSERT INTO users (email, password_hash, role, wallet_address)
-                     VALUES (:email, :password_hash, :role, :wallet_address)""",
-            values={
-                "email": demo_email,
-                "password_hash": pwd_context.hash("demo-installer-2024"),
-                "role": "installer",
-                "wallet_address": "0xDemoWalletAddress000000000000000000000000"
-            }
-        )
-        print(f"✓ Seeded demo installer: {demo_email}")
-    else:
-        demo_user_id = existing_demo["id"]
 
-    # Seed demo device
+    reading_ids = [item["id"] for item in contributing]
+    placeholders = ", ".join(f":r{i}" for i in range(len(reading_ids)))
+    await database.execute(
+        query=f"""UPDATE generation_readings SET consumed_by_credit_id = :credit_row_id
+                  WHERE id IN ({placeholders})""",
+        values={"credit_row_id": row_id, **{f"r{i}": rid for i, rid in enumerate(reading_ids)}},
+    )
+
+    return row_id
+
+
+async def process_raw_readings(
+    readings: list[dict],
+    owner_user_id: int,
+) -> tuple[int, int]:
+    """
+    Ingest readings and aggregate them into whole-tonne credits.
+
+    Returns (readings_inserted, credits_issued). Both steps are idempotent:
+    readings are keyed by fingerprint and only unconsumed readings contribute to
+    a new credit, so any leftover CO2 carries forward to the next ingestion.
+    """
+    inserted = await _insert_readings(readings, owner_user_id)
+
+    unconsumed = await database.fetch_all(
+        """SELECT id, reading_id, device_id, owner_user_id, total_kwh,
+                  co2_avoided_kg, timestamp, location, signature
+           FROM generation_readings
+           WHERE consumed_by_credit_id IS NULL
+           ORDER BY device_id, timestamp ASC"""
+    )
+
+    # Credits are per-device, so each device accumulates its own remainder.
+    by_device: dict[str, list] = {}
+    for row in unconsumed:
+        by_device.setdefault(row["device_id"], []).append(row)
+
+    credits_issued = 0
+    for device_id, group in by_device.items():
+        acc_co2 = 0.0
+        acc_kwh = 0.0
+        acc_readings: list[dict] = []
+        period_start: Optional[str] = None
+
+        for row in group:
+            if period_start is None:
+                period_start = row["timestamp"]
+
+            acc_co2 += row["co2_avoided_kg"]
+            acc_kwh += row["total_kwh"]
+            acc_readings.append(
+                {"reading_id": row["reading_id"], "signature": row["signature"], "id": row["id"]}
+            )
+
+            while acc_co2 >= config.KG_CO2_PER_CREDIT:
+                await _issue_credit(
+                    device_id=device_id,
+                    owner_user_id=row["owner_user_id"] or owner_user_id,
+                    total_kwh=acc_kwh,
+                    period_start=period_start,
+                    period_end=row["timestamp"],
+                    location=row["location"] or "India",
+                    contributing=acc_readings,
+                )
+                credits_issued += 1
+
+                acc_co2 -= config.KG_CO2_PER_CREDIT
+                acc_kwh = 0.0
+                acc_readings = []
+                period_start = row["timestamp"]
+
+    return inserted, credits_issued
+
+
+# ── Seeding ────────────────────────────────────────────────────────────────
+
+async def _seed_user(email: str, password: str, role: str, wallet_address: str = None) -> int:
+    """Create the account if absent. Returns its id either way."""
+    existing = await database.fetch_one(
+        query="SELECT id FROM users WHERE email = :email", values={"email": email}
+    )
+    if existing:
+        return existing["id"]
+
+    user_id = await database.execute(
+        query="""INSERT INTO users (email, password_hash, role, wallet_address)
+                 VALUES (:email, :password_hash, :role, :wallet_address)""",
+        values={
+            "email": email,
+            "password_hash": pwd_context.hash(password),
+            "role": role,
+            "wallet_address": wallet_address,
+        },
+    )
+    print(f"✓ Seeded {role} account: {email}")
+    return user_id
+
+
+async def _seed_demo_data():
+    """Create the demo installer, its device, and the seed reading history."""
+    installer_id = await _seed_user(
+        config.DEMO_INSTALLER_EMAIL,
+        config.DEMO_INSTALLER_PASSWORD,
+        "installer",
+        wallet_address=config.DEMO_INSTALLER_WALLET,
+    )
+
+    # Earlier builds seeded a placeholder that only looked like an address.
+    # It is not valid hex, so any mint to it would have reverted on-chain.
+    #
+    # The wildcard is bound as a parameter rather than written into the SQL:
+    # the query compiler applies %-formatting to the statement text, so a
+    # literal % in a LIKE pattern raises at execution time.
+    await database.execute(
+        query="""UPDATE users SET wallet_address = :addr
+                 WHERE email = :email AND wallet_address LIKE :placeholder""",
+        values={
+            "addr": config.DEMO_INSTALLER_WALLET,
+            "email": config.DEMO_INSTALLER_EMAIL,
+            "placeholder": "0xDemo%",
+        },
+    )
+
     existing_device = await database.fetch_one(
         query="SELECT id FROM devices WHERE device_id = :device_id",
-        values={"device_id": "1BY6WEcLGh8j5v7"}
+        values={"device_id": config.DEMO_DEVICE_ID},
     )
     if not existing_device:
         await database.execute(
             query="""INSERT INTO devices (device_id, owner_user_id, location)
                      VALUES (:device_id, :owner_user_id, :location)""",
             values={
-                "device_id": "1BY6WEcLGh8j5v7",
-                "owner_user_id": demo_user_id,
-                "location": "Patna, Bihar, India"
-            }
+                "device_id": config.DEMO_DEVICE_ID,
+                "owner_user_id": installer_id,
+                "location": config.DEMO_DEVICE_LOCATION,
+            },
         )
-        print("✓ Seeded demo device: 1BY6WEcLGh8j5v7")
+        print(f"✓ Seeded demo device: {config.DEMO_DEVICE_ID}")
 
-    # Sync credits from IPFS data (single source of truth)
-    await sync_credits_from_ipfs(demo_user_id)
+    await sync_readings_from_ipfs(installer_id)
 
 
-async def process_raw_readings(readings: list[dict], owner_user_id: int) -> int:
+async def sync_readings_from_ipfs(owner_user_id: int):
     """
-    Ingest, sign, and idempotently aggregate raw readings into 1-tonne credits.
-    Assumes single owner per ingestion batch — revisit if multi-device batches are needed.
+    Load the published seed dataset and feed it through the normal ingestion
+    path. A network failure here leaves the API running on whatever is already
+    in the database rather than blocking startup.
     """
-    from ipfs_utils import upload_credit_to_ipfs
-    
-    inserts = 0
-    # 1. Ingestion: Serialize, hash, and insert
-    existing_rows = await database.fetch_all("SELECT reading_id FROM generation_readings")
-    existing_ids = {row["reading_id"] for row in existing_rows}
-    
-    for r in readings:
-        cid = str(r.get("reading_id", ""))
-        if not cid:
-            # Fallback for CSV: hash device_id + timestamp to ensure idempotency if no reading_id provided
-            cid = hashlib.sha256(f"{r.get('device_id')}_{r.get('timestamp')}".encode('utf-8')).hexdigest()[:16]
-            
-        if cid not in existing_ids:
-            reading_dict = {
-                "device_id": r.get("device_id"),
-                "timestamp": r.get("timestamp"),
-                "total_kwh": r.get("total_kwh", 0),
-                "co2_avoided_kg": r.get("co2_avoided_kg", 0),
-                "methodology": "CEA Grid Emission Factor 0.82 kg/kWh",
-                "standard": "CTN-SOLAR-V1",
-                "location": r.get("location", "India")
-            }
-            serialized = json.dumps(reading_dict, sort_keys=True)
-            signature = hashlib.sha256(serialized.encode('utf-8')).hexdigest()
-            
-            await database.execute(
-                query="""INSERT INTO generation_readings 
-                    (reading_id, device_id, owner_user_id, total_kwh, co2_avoided_kg,
-                     timestamp, methodology, standard, location, signature)
-                    VALUES (:reading_id, :device_id, :owner_user_id, :total_kwh, :co2_avoided_kg,
-                            :timestamp, :methodology, :standard, :location, :signature)""",
-                values={
-                    "reading_id": cid,
-                    "device_id": reading_dict["device_id"],
-                    "owner_user_id": owner_user_id,
-                    "total_kwh": reading_dict["total_kwh"],
-                    "co2_avoided_kg": reading_dict["co2_avoided_kg"],
-                    "timestamp": reading_dict["timestamp"],
-                    "methodology": reading_dict["methodology"],
-                    "standard": reading_dict["standard"],
-                    "location": reading_dict["location"],
-                    "signature": signature
-                }
-            )
-            inserts += 1
+    import requests
 
-    # 2. Accumulation: Fetch all unconsumed readings (idempotent remainder tracking)
-    unconsumed = await database.fetch_all(
-        "SELECT id, reading_id, co2_avoided_kg, total_kwh, timestamp, device_id, signature "
-        "FROM generation_readings WHERE consumed_by_credit_id IS NULL ORDER BY timestamp ASC"
-    )
-    
-    new_credits = 0
-    
-    # We group unconsumed readings by device_id since 1-tonne credits are per-device
-    grouped = {}
-    for row in unconsumed:
-        d_id = row["device_id"]
-        if d_id not in grouped:
-            grouped[d_id] = []
-        grouped[d_id].append(row)
-        
-    for device_id, group in grouped.items():
-        acc_co2 = 0.0
-        acc_kwh = 0.0
-        acc_readings = []
-        period_start = None
-        
-        for r in group:
-            if period_start is None:
-                period_start = r["timestamp"]
-                
-            acc_co2 += r["co2_avoided_kg"]
-            acc_kwh += r["total_kwh"]
-            acc_readings.append({"reading_id": r["reading_id"], "signature": r["signature"], "id": r["id"]})
-            
-            while acc_co2 >= 1000.0:
-                # Mint a new 1-tonne credit
-                existing_credits_count = dict(await database.fetch_one("SELECT COUNT(*) as cnt FROM credits"))["cnt"]
-                new_credit_id = existing_credits_count + 1
-                
-                credit_json_payload = {
-                    "credit_id": new_credit_id,
-                    "device_id": device_id,
-                    "owner_user_id": owner_user_id,
-                    "total_kwh": acc_kwh,
-                    "co2_avoided_kg": 1000.0,
-                    "period_start": period_start,
-                    "period_end": r["timestamp"],
-                    "methodology": "CEA Grid Emission Factor 0.82 kg/kWh",
-                    "standard": "CTN-SOLAR-V1",
-                    "contributing_readings": acc_readings
-                }
-                
-                # Unconditionally upload IPFS certificate on mint
-                ipfs_hash = upload_credit_to_ipfs(credit_json_payload)
-                
-                # Insert into DB
-                db_id = await database.execute(
-                    query="""INSERT INTO credits 
-                        (credit_id, device_id, owner_user_id, total_kwh, co2_avoided_kg,
-                         period_start, period_end, status, contributing_readings, ipfs_hash)
-                        VALUES (:credit_id, :device_id, :owner_user_id, :kwh, 1000,
-                                :p_start, :p_end, 'verified', :readings, :ipfs_hash)""",
-                    values={
-                        "credit_id": new_credit_id,
-                        "device_id": device_id,
-                        "owner_user_id": owner_user_id,
-                        "kwh": acc_kwh,
-                        "p_start": period_start,
-                        "p_end": r["timestamp"],
-                        "readings": json.dumps(acc_readings),
-                        "ipfs_hash": ipfs_hash
-                    }
-                )
-                new_credits += 1
-                
-                # Mark these readings as consumed
-                placeholders = ", ".join([str(item["id"]) for item in acc_readings])
-                await database.execute(f"UPDATE generation_readings SET consumed_by_credit_id = {db_id} WHERE id IN ({placeholders})")
-                
-                acc_co2 -= 1000.0
-                acc_kwh = 0.0
-                acc_readings = []
-                period_start = r["timestamp"]
-
-    return inserts, new_credits
-
-
-async def sync_credits_from_ipfs(owner_user_id):
-    """Fetch from IPFS and feed into shared processor."""
-    import requests as req
-    import json
-
-    IPFS_URL = "https://ivory-geographical-lungfish-400.mypinata.cloud/ipfs/bafybeifpn7y2r2rsjtvm4hun3dy63jkp5ah7qxfwhk5u6bemkapmis2qku"
+    from data_utils import to_discrete_readings
 
     try:
-        r = req.get(IPFS_URL, timeout=30)
-        data = r.json()
-        credits_list = data if isinstance(data, list) else data.get("credits", [])
+        response = requests.get(config.IPFS_SEED_URL, timeout=config.IPFS_SEED_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        print(f"⚠ Could not load seed dataset from IPFS: {exc}")
+        return
 
-        from data_utils import parse_discrete_credits
-        credits_list = parse_discrete_credits(credits_list)
-        
-        inserts, new_credits = await process_raw_readings(credits_list, owner_user_id)
-                
-        print(f"✓ Synced IPFS: {inserts} new readings, accumulated {new_credits} new 1-tonne credits.")
+    raw = payload if isinstance(payload, list) else payload.get("credits", [])
+    inserted, issued = await process_raw_readings(to_discrete_readings(raw), owner_user_id)
+    print(f"✓ Synced seed dataset: {inserted} new readings, {issued} new credits")
 
-    except Exception as e:
-        print(f"⚠ Failed to seed credits from IPFS: {e}")
+
+# ── Lifecycle ──────────────────────────────────────────────────────────────
+
+async def init_db():
+    """Connect, bring the schema up to date, and seed baseline accounts."""
+    await database.connect()
+    await _apply_schema()
+
+    await _seed_user(config.ADMIN_EMAIL, config.ADMIN_PASSWORD, "admin")
+
+    if config.SEED_DEMO_DATA:
+        await _seed_demo_data()
 
 
 async def shutdown_db():
-    """Disconnect from database."""
+    """Close the connection pool."""
     await database.disconnect()
