@@ -9,12 +9,12 @@ import secrets
 import time
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field, field_validator
 
 import config
 from auth import require_installer
-from data_utils import CsvError, parse_reading_csv
+import csv_schema
 from database import database, db_execute_with_retry, process_raw_readings
 
 router = APIRouter(prefix="/api/installer", tags=["installer"])
@@ -433,17 +433,44 @@ async def add_manual_device(
     }
 
 
-@router.post("/upload-readings")
-async def upload_readings(
+@router.post("/upload-readings/preview")
+async def preview_readings(
     file: UploadFile = File(...), user: dict = Depends(require_installer)
 ):
     """
-    Import readings for this seller's own devices from a CSV.
+    Work out what an uploaded file contains, without storing anything.
 
-    Only their devices are offered to the parser, so a row naming someone
-    else's meter is refused rather than silently crediting the wrong account.
+    Meter exports have no shared schema, so the columns are identified by what
+    they look like. The interpretation is returned for the uploader to check
+    first: a wrong guess written silently would put invented generation into the
+    ledger, and the ledger is the whole product.
     """
-    devices = {
+    devices = await _owned_devices(user)
+    if not devices:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Add a meter before uploading readings for it.",
+        )
+
+    try:
+        found = csv_schema.detect(await file.read())
+    except csv_schema.SchemaError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    summary = found.as_dict()
+    summary.update({
+        "description": found.describe(),
+        "your_devices": sorted(devices),
+        "device_required": found.device_column is None,
+        "estimated_credits": int(
+            found.total_kwh * config.EMISSION_FACTOR_KG_PER_KWH // config.KG_CO2_PER_CREDIT
+        ),
+    })
+    return summary
+
+
+async def _owned_devices(user: dict) -> dict:
+    return {
         row["device_id"]: dict(row)
         for row in await database.fetch_all(
             query="""SELECT device_id, owner_user_id, location
@@ -451,20 +478,74 @@ async def upload_readings(
             values={"user_id": user["id"]},
         )
     }
+
+
+@router.post("/upload-readings")
+async def upload_readings(
+    file: UploadFile = File(...),
+    device_id: str = Form(default=""),
+    user: dict = Depends(require_installer),
+):
+    """
+    Import readings for this seller's own meters.
+
+    The file is interpreted the same way the preview described it. Rows naming a
+    meter this account does not own are refused rather than silently crediting
+    someone else.
+    """
+    devices = await _owned_devices(user)
     if not devices:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Add a device before uploading readings for it.",
+            detail="Add a meter before uploading readings for it.",
         )
 
+    content = await file.read()
+
     try:
-        readings = parse_reading_csv(
-            await file.read(), devices, config.EMISSION_FACTOR_KG_PER_KWH
-        )
-    except CsvError as exc:
+        found = csv_schema.detect(content)
+    except csv_schema.SchemaError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    chosen = (device_id or "").strip()
+    if found.device_column is None:
+        # Nothing in the file says which meter this is, so it cannot be guessed.
+        if not chosen:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This file has no device column, so choose which meter it belongs to.",
+            )
+        if chosen not in devices:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"'{chosen}' is not one of your meters.",
+            )
+
+    parsed = csv_schema.to_readings(content, found, chosen or next(iter(devices)))
+
+    unknown = sorted({r["device_id"] for r in parsed} - set(devices))
+    if unknown:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=exc.as_detail() if exc.errors else exc.message,
+            detail=f"The file names meters that are not yours: {', '.join(unknown[:5])}.",
+        )
+
+    readings = [
+        {
+            "device_id": r["device_id"],
+            "timestamp": r["timestamp"],
+            "total_kwh": r["delta_kwh"],
+            "co2_avoided_kg": r["delta_kwh"] * config.EMISSION_FACTOR_KG_PER_KWH,
+            "location": devices[r["device_id"]]["location"],
+            "owner_user_id": user["id"],
+        }
+        for r in parsed
+        if r["delta_kwh"] > 0
+    ]
+    if not readings:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No generation was found in that file — every interval came to zero.",
         )
 
     inserted, issued = await process_raw_readings(readings, user["id"])
@@ -475,6 +556,7 @@ async def upload_readings(
         "rows_processed": len(readings),
         "credits_issued": issued,
         "attested": False,
+        "interpreted_as": found.describe(),
         "message": (
             f"Imported {inserted} reading(s) and issued {issued} credit(s). "
             "Uploaded readings are recorded as imported, not attested."

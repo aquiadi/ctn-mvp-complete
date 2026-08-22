@@ -193,9 +193,27 @@ at a deployed instance.
 > still being rolled out, and it is expected to fall away as devices arrive.
 
 Not everyone has a sensor yet, so a seller can add a meter from their dashboard
-and upload readings as a CSV of `device_id, timestamp, delta_kwh`. Only their own
-devices are accepted, so a row naming someone else's meter is refused rather than
-crediting the wrong account.
+and upload whatever their meter or inverter exports. There is no required column
+layout, because real exports do not share one.
+
+The file is read by working out what its columns are: a date or time column and a
+column of energy or power is all that is needed. Names, units (`Wh`, `kWh`,
+`MWh`, `W`, `kW`), delimiters (comma, semicolon, tab), and date formats are
+detected. A running meter total is recognised and differenced into per-interval
+generation, since treating a lifetime figure as one interval's output would
+credit the entire history on every row. Power readings are converted to energy
+using the interval between timestamps.
+
+Detection is a guess, so it is never applied silently. The upload is read first
+and the interpretation shown back — which columns were used, the units, whether
+it looked cumulative, the resulting total, and the first few rows — for the
+seller to confirm before anything is written. A file with no readable time or
+quantity column is refused with a reason rather than a schema complaint.
+
+Only that seller's own meters are accepted, so a row naming someone else's is
+refused rather than crediting the wrong account. Where the export has no device
+column, the seller picks which meter it belongs to, because nothing in the file
+says.
 
 An uploaded number is an assertion by whoever typed it. It carries no device
 signature, so it is recorded as **`imported`** rather than attested, shown that
@@ -274,10 +292,11 @@ backend/
   chain.py                    Contract access, off the event loop
   database.py                 Schema, migrations, ingestion, credit issuance
   attestation.py              Canonical signed message, signature verification
+  csv_schema.py               Works out what an uploaded export contains
   data_utils.py               Cumulative meter readings → per-interval deltas
   ipfs_utils.py               Pinata certificate storage
   routes/                     auth · installer · marketplace · admin · ingest
-  tests/                      164 tests
+  tests/                      173 tests
 
 firmware/
   ctn_sensor/                 ESP32 sketch: enrol, sign, report over WiFi
@@ -323,7 +342,7 @@ listed or reserved, a buyer holding a reservation, or the last administrator.
 cd backend && ../.venv/bin/python -m pytest
 ```
 
-164 tests covering device attestation, self-service onboarding, authentication and role enforcement,
+173 tests covering device attestation, self-service onboarding, authentication and role enforcement,
 wallet-signature verification, credit issuance and idempotency, marketplace
 concurrency, device onboarding and approval, account transfer and closure, CSV
 validation, and the audit trail.

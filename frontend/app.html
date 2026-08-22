@@ -166,6 +166,16 @@
     .panel-hint code { background: var(--bg2); padding: 1px 5px; border-radius: 4px; }
     .step { font-size: 11px; font-weight: 500; color: var(--text); margin-bottom: 0.45rem; display: flex; align-items: center; gap: 7px; }
     .step-num { display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 50%; background: var(--green); color: #fff; font-size: 9px; }
+    .preview-box { margin-top: 0.8rem; padding: 1rem; background: var(--bg2); border-radius: var(--radius-sm); border: 1px solid var(--border); }
+    .preview-title { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text3); margin-bottom: 0.5rem; }
+    .preview-summary { font-size: 12px; color: var(--text); line-height: 1.6; margin-bottom: 0.6rem; }
+    .preview-warn { font-size: 11px; color: var(--amber); background: var(--amber-light); border-radius: 4px; padding: 0.4rem 0.6rem; margin-bottom: 0.4rem; line-height: 1.5; }
+    .preview-figures { display: flex; gap: 16px; font-size: 12px; color: var(--text2); margin-bottom: 0.6rem; flex-wrap: wrap; }
+    .preview-rows { border-top: 1px solid var(--border); padding-top: 0.4rem; }
+    .preview-row { display: flex; justify-content: space-between; font-size: 11px; color: var(--text2); padding: 2px 0; }
+    .preview-field { margin-top: 0.6rem; }
+    .preview-field label { display: block; font-size: 11px; color: var(--text3); margin-bottom: 0.25rem; }
+    .preview-field select { width: 100%; padding: 0.5rem; border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; background: var(--bg); color: var(--text); }
     .pairing-next { font-size: 12px; color: var(--text2); line-height: 1.6; margin: 0.8rem 0 0.5rem; }
     .pairing-details { font-size: 11px; color: var(--text2); }
     .pairing-details summary { cursor: pointer; color: var(--green); padding: 0.3rem 0; }
@@ -586,7 +596,8 @@
         <div class="panel">
           <p class="panel-lead">
             Send us the readings from your existing meter. Add the meter once,
-            then upload a spreadsheet whenever you have new data.
+            then upload whatever your meter or inverter exports — we work out
+            what the columns mean and show you before anything is saved.
           </p>
 
           <div class="step"><span class="step-num">1</span> Add your meter</div>
@@ -599,19 +610,105 @@
           </button>
           <div id="manual-device-result" class="device-result"></div>
 
-          <div class="step" style="margin-top:1rem;"><span class="step-num">2</span> Upload readings</div>
+          <div class="step" style="margin-top:1rem;"><span class="step-num">2</span> Upload your export</div>
           <p class="panel-hint">
-            A spreadsheet saved as CSV with three columns:
-            <code>device_id</code>, <code>timestamp</code>, <code>delta_kwh</code>
-            — the meter name, when it was read, and the units generated since the
-            last reading.
+            A CSV from your meter or inverter. It needs a date or time column and
+            a column of energy or power — names and units are worked out for you,
+            and running totals are handled.
           </p>
           <div class="device-add-row">
-            <input type="file" id="readings-file" accept=".csv,text/csv">
-            <button class="btn-page" onclick="uploadReadings()">Upload</button>
+            <input type="file" id="readings-file" accept=".csv,text/csv" onchange="previewReadings()">
           </div>
           <div id="upload-result" class="device-result"></div>
+          <div id="upload-preview"></div>
         </div>`;
+    }
+
+    async function previewReadings() {
+      const input = document.getElementById('readings-file');
+      const result = document.getElementById('upload-result');
+      const preview = document.getElementById('upload-preview');
+
+      preview.innerHTML = '';
+      if (!input.files.length) return;
+
+      result.textContent = 'Reading your file…';
+      result.className = 'device-result';
+
+      const form = new FormData();
+      form.append('file', input.files[0]);
+
+      try {
+        const found = await CTN.postForm('/api/installer/upload-readings/preview', form);
+        result.textContent = '';
+        preview.innerHTML = renderUploadPreview(found);
+      } catch (e) {
+        result.textContent = e.message;
+        result.className = 'device-result err';
+      }
+    }
+
+    function renderUploadPreview(found) {
+      // Detection is a guess, so it is always shown for confirmation. Saving
+      // something misread would put invented generation into the ledger.
+      const rows = found.sample.map(r => `
+        <div class="preview-row">
+          <span>${esc(r.timestamp)}</span><span>${r.kwh} kWh</span>
+        </div>`).join('');
+
+      const picker = found.device_required
+        ? `<div class="preview-field">
+             <label for="assign-device">Which meter is this from?</label>
+             <select id="assign-device">
+               ${found.your_devices.map(d => `<option value="${esc(d)}">${esc(d)}</option>`).join('')}
+             </select>
+           </div>`
+        : '';
+
+      const warnings = (found.warnings || []).map(w =>
+        `<div class="preview-warn">${esc(w)}</div>`).join('');
+
+      return `
+        <div class="preview-box">
+          <div class="preview-title">Here is what we found — check before saving</div>
+          <div class="preview-summary">${esc(found.description)}</div>
+          ${warnings}
+          <div class="preview-figures">
+            <div><strong>${CTN.fmt.number(found.rows)}</strong> readings</div>
+            <div><strong>${CTN.fmt.number(found.total_kwh)}</strong> kWh total</div>
+            <div><strong>${found.estimated_credits}</strong> credit(s)</div>
+          </div>
+          <div class="preview-rows">${rows}</div>
+          ${picker}
+          <button class="btn-sell" style="margin-top:0.7rem;" onclick="confirmUpload()">
+            Looks right — save it →
+          </button>
+        </div>`;
+    }
+
+    async function confirmUpload() {
+      const input = document.getElementById('readings-file');
+      const result = document.getElementById('upload-result');
+      const assign = document.getElementById('assign-device');
+
+      const form = new FormData();
+      form.append('file', input.files[0]);
+      if (assign) form.append('device_id', assign.value);
+
+      result.textContent = 'Saving…';
+      result.className = 'device-result';
+
+      try {
+        const response = await CTN.postForm('/api/installer/upload-readings', form);
+        result.textContent = response.message;
+        result.className = 'device-result ok';
+        document.getElementById('upload-preview').innerHTML = '';
+        input.value = '';
+        await init();
+      } catch (e) {
+        result.textContent = e.message;
+        result.className = 'device-result err';
+      }
     }
 
     async function addManualDevice() {
@@ -631,34 +728,6 @@
         });
         result.textContent = response.message;
         result.className = 'device-result ok';
-      } catch (e) {
-        result.textContent = e.message;
-        result.className = 'device-result err';
-      }
-    }
-
-    async function uploadReadings() {
-      const input = document.getElementById('readings-file');
-      const result = document.getElementById('upload-result');
-
-      if (!input.files.length) {
-        result.textContent = 'Choose a CSV file first.';
-        result.className = 'device-result err';
-        return;
-      }
-
-      const form = new FormData();
-      form.append('file', input.files[0]);
-
-      result.textContent = 'Uploading…';
-      result.className = 'device-result';
-
-      try {
-        const response = await CTN.postForm('/api/installer/upload-readings', form);
-        result.textContent = response.message;
-        result.className = 'device-result ok';
-        input.value = '';
-        await init();
       } catch (e) {
         result.textContent = e.message;
         result.className = 'device-result err';

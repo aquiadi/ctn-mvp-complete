@@ -349,7 +349,7 @@ async def test_a_seller_cannot_upload_for_someone_elses_meter(app_client, make_u
         "/api/installer/upload-readings", headers=auth(intruder_token),
         files=_csv("device_id,timestamp,delta_kwh\nMETER-OWNED,2026-03-03 06:00:00,10\n"))
     assert response.status_code == 400
-    assert "not one of your devices" in response.text
+    assert "not yours" in response.text
 
 
 async def test_uploading_without_a_meter_explains_what_to_do(app_client, make_user):
@@ -358,7 +358,7 @@ async def test_uploading_without_a_meter_explains_what_to_do(app_client, make_us
         "/api/installer/upload-readings", headers=auth(token),
         files=_csv("device_id,timestamp,delta_kwh\nX,2026-03-04 06:00:00,10\n"))
     assert response.status_code == 400
-    assert "Add a device" in response.json()["detail"]
+    assert "Add a meter" in response.json()["detail"]
 
 
 async def test_a_duplicate_meter_name_is_refused(app_client, make_user):
@@ -384,3 +384,151 @@ async def test_uploaded_credits_are_also_pending(app_client, make_user):
     row = await database.database.fetch_one(
         "SELECT status FROM credits WHERE device_id = 'METER-PENDING'")
     assert row["status"] == "pending"
+
+
+# ── Reading whatever shape the meter exported ──────────────────────────────
+
+async def _meter(app_client, token, device_id="ANY-01"):
+    await app_client.post("/api/installer/devices", headers=auth(token),
+                          json={"device_id": device_id, "location": "X"})
+    return device_id
+
+
+async def _preview(app_client, token, text):
+    return await app_client.post(
+        "/api/installer/upload-readings/preview", headers=auth(token),
+        files={"file": ("export.csv", text, "text/csv")})
+
+
+async def _upload(app_client, token, text, device_id=""):
+    return await app_client.post(
+        "/api/installer/upload-readings", headers=auth(token),
+        files={"file": ("export.csv", text, "text/csv")},
+        data={"device_id": device_id})
+
+
+async def test_a_cumulative_export_is_differenced(app_client, make_user):
+    """
+    Inverters usually report a lifetime total. Treating that as per-interval
+    generation would credit the entire history on every single row.
+    """
+    token, _ = await make_user("installer")
+    device = await _meter(app_client, token, "CUM-01")
+
+    text = ("Date/Time,Total Yield (kWh)\n"
+            "2026-05-01 06:00:00,1000.0\n"
+            "2026-05-01 06:15:00,1000.5\n"
+            "2026-05-01 06:30:00,1001.0\n")
+
+    preview = (await _preview(app_client, token, text)).json()
+    assert preview["cumulative"] is True
+    assert preview["total_kwh"] == 1.0          # not 3001.5
+
+    response = await _upload(app_client, token, text, device)
+    assert response.status_code == 200, response.text
+
+
+async def test_power_readings_are_converted_to_energy(app_client, make_user):
+    """Some exports give kW at an instant, which is not energy until timed."""
+    token, _ = await make_user("installer")
+    device = await _meter(app_client, token, "PWR-01")
+
+    text = ("Time,AC Power (kW)\n"
+            "2026-05-02T06:00:00,2.0\n"
+            "2026-05-02T06:15:00,2.0\n")
+
+    preview = (await _preview(app_client, token, text)).json()
+    assert preview["value_kind"] == "power"
+    assert preview["interval_minutes"] == 15
+    assert preview["total_kwh"] == 1.0          # 2 kW * 0.25 h * 2
+
+    assert (await _upload(app_client, token, text, device)).status_code == 200
+
+
+async def test_watt_hours_are_scaled(app_client, make_user):
+    token, _ = await make_user("installer")
+    device = await _meter(app_client, token, "WH-01")
+
+    text = "timestamp,Energy (Wh)\n2026-05-03 06:00:00,1000\n2026-05-03 06:15:00,500\n"
+    preview = (await _preview(app_client, token, text)).json()
+    assert preview["unit"] == "Wh"
+    assert preview["total_kwh"] == 1.5
+
+    assert (await _upload(app_client, token, text, device)).status_code == 200
+
+
+async def test_semicolons_and_european_dates_are_read(app_client, make_user):
+    token, _ = await make_user("installer")
+    device = await _meter(app_client, token, "EU-01")
+
+    text = "Datum;Ertrag kWh\n01/05/2026 06:00;0.5\n01/05/2026 06:15;0.7\n"
+    preview = (await _preview(app_client, token, text)).json()
+    assert preview["rows"] == 2
+    assert (await _upload(app_client, token, text, device)).status_code == 200
+
+
+async def test_a_device_column_is_used_when_present(app_client, make_user):
+    token, _ = await make_user("installer")
+    await _meter(app_client, token, "INV-A")
+    await _meter(app_client, token, "INV-B")
+
+    text = ("Serial,Date,Generation kWh\n"
+            "INV-A,2026-05-04 06:00:00,0.5\n"
+            "INV-B,2026-05-04 06:00:00,0.7\n")
+
+    preview = (await _preview(app_client, token, text)).json()
+    assert preview["device_column"] == "Serial"
+    assert preview["device_required"] is False
+
+    assert (await _upload(app_client, token, text)).status_code == 200
+
+
+async def test_a_file_without_a_device_column_must_be_assigned(app_client, make_user):
+    """Nothing in the file says which meter it is, so it cannot be guessed."""
+    token, _ = await make_user("installer")
+    await _meter(app_client, token, "SOLO-01")
+
+    text = "Time,kWh\n2026-05-05 06:00:00,0.5\n2026-05-05 06:15:00,0.6\n"
+    preview = (await _preview(app_client, token, text)).json()
+    assert preview["device_required"] is True
+
+    unassigned = await _upload(app_client, token, text)
+    assert unassigned.status_code == 400
+    assert "choose which meter" in unassigned.json()["detail"]
+
+    assert (await _upload(app_client, token, text, "SOLO-01")).status_code == 200
+
+
+async def test_readings_for_another_sellers_meter_are_refused(app_client, make_user):
+    owner_token, _ = await make_user("installer")
+    await _meter(app_client, owner_token, "THEIRS-01")
+
+    other_token, _ = await make_user("installer")
+    await _meter(app_client, other_token, "MINE-01")
+
+    text = "Serial,Time,kWh\nTHEIRS-01,2026-05-06 06:00:00,0.5\n"
+    response = await _upload(app_client, other_token, text)
+    assert response.status_code == 400
+    assert "not yours" in response.json()["detail"]
+
+
+async def test_a_file_with_no_time_column_is_explained(app_client, make_user):
+    token, _ = await make_user("installer")
+    await _meter(app_client, token, "NOTIME-01")
+
+    response = await _preview(app_client, token, "name,amount\nfoo,1\nbar,2\n")
+    assert response.status_code == 400
+    assert "dates or times" in response.json()["detail"]
+
+
+async def test_preview_writes_nothing(app_client, make_user):
+    """The point of a preview is that a wrong guess costs nothing."""
+    token, _ = await make_user("installer")
+    await _meter(app_client, token, "DRY-01")
+
+    text = "Time,kWh\n2026-05-07 06:00:00,0.5\n2026-05-07 06:15:00,0.6\n"
+    assert (await _preview(app_client, token, text)).status_code == 200
+
+    row = await database.database.fetch_one(
+        "SELECT COUNT(*) AS c FROM generation_readings WHERE device_id = 'DRY-01'")
+    assert row["c"] == 0
