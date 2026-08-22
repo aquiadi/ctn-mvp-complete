@@ -84,6 +84,7 @@
     .notice-strip.visible { display: block; }
     .notice-strip.warn { background: var(--amber-light); color: var(--amber); }
     .cols-7 { grid-template-columns: 0.7fr 1.4fr 1.4fr 0.9fr 0.9fr 0.9fr 1.1fr; }
+    .cols-dev { grid-template-columns: 1.3fr 1.6fr 1.3fr 0.8fr 0.8fr 0.8fr; }
     .cols-txn { grid-template-columns: 0.6fr 1.6fr 0.8fr 1fr 1.4fr; }
     .link { color: var(--blue); text-decoration: none; }
     .link:hover { text-decoration: underline; }
@@ -93,7 +94,7 @@
 <body>
   <nav>
     <div class="nav-left">
-      <a href="/admin" class="nav-logo"><div class="nav-logo-dot"></div> CTN</a>
+      <a href="/" class="nav-logo" title="Back to the CTN homepage"><div class="nav-logo-dot"></div> CTN</a>
       <span class="admin-badge">Admin</span>
       <div class="nav-tabs">
         <button class="nav-tab active" onclick="showSection('overview')">Overview</button>
@@ -183,6 +184,14 @@
       <div class="page-header"><p class="page-label">Operations</p><h1>Devices &amp; data</h1></div>
 
       <div class="card">
+        <div class="card-header">
+          <div class="card-title">Registered devices</div>
+          <div class="page-info" id="devices-count"></div>
+        </div>
+        <div id="devices-list"><div class="empty-note">Loading...</div></div>
+      </div>
+
+      <div class="card">
         <div class="card-title">Register a device</div>
         <div class="form-row">
           <input id="device-id" class="input-sm" placeholder="Device ID">
@@ -251,7 +260,7 @@
       overview: loadOverview,
       installers: loadInstallers,
       credits: () => loadCredits(1),
-      devices: () => {},
+      devices: loadDevices,
       transactions: () => loadTransactions(1),
       audit: () => loadAudit(1),
       health: loadHealth,
@@ -484,6 +493,33 @@
       el.className = 'form-result ' + (ok ? 'ok' : 'err');
     }
 
+    async function loadDevices() {
+      const list = document.getElementById('devices-list');
+      try {
+        const data = await CTN.get('/api/admin/devices');
+        document.getElementById('devices-count').textContent =
+          `${data.total} device${data.total === 1 ? '' : 's'}`;
+
+        list.innerHTML = data.devices.length ? `
+          <div class="table-row cols-dev header">
+            <div>Device ID</div><div>Owner</div><div>Location</div>
+            <div>Readings</div><div>Credits</div><div>kWh</div>
+          </div>
+          ${data.devices.map(d => `
+            <div class="table-row cols-dev">
+              <div style="font-family:var(--mono);">${esc(d.device_id)}</div>
+              <div>${esc(d.owner_email || '—')}</div>
+              <div>${esc(d.location || '—')}</div>
+              <div>${CTN.fmt.number(d.reading_count)}</div>
+              <div>${CTN.fmt.number(d.credit_count)}</div>
+              <div>${CTN.fmt.number(d.total_kwh)}</div>
+            </div>`).join('')}`
+          : '<div class="empty-note">No devices registered yet. Add one below.</div>';
+      } catch (e) {
+        list.innerHTML = `<div class="empty-note">${esc(e.message)}</div>`;
+      }
+    }
+
     async function registerDevice() {
       const device_id = document.getElementById('device-id').value.trim();
       const owner_email = document.getElementById('device-owner').value.trim();
@@ -499,6 +535,7 @@
         setResult('device-result',
           `Device ${result.device_id} registered to ${result.owner_email}.`, true);
         document.getElementById('device-id').value = '';
+        await loadDevices();
       } catch (e) {
         setResult('device-result', e.message, false);
       }
@@ -584,6 +621,15 @@
 
     // ── Health ──
 
+    // The contract counter is cumulative across every deployment that has used
+    // it, so it is labelled to avoid reading as this platform's mint count.
+    const HEALTH_LABELS = {
+      contract_lifetime_credits: 'contract lifetime credits (all deployments)',
+      minted_by_this_platform: 'minted by this platform',
+      db_credits: 'credits in database',
+      db_users: 'registered users',
+    };
+
     async function loadHealth() {
       const list = document.getElementById('health-list');
       try {
@@ -599,7 +645,7 @@
             display = esc(value);
           }
           return `<div class="health-row">
-            <div class="health-label">${key.replace(/_/g, ' ')}</div>
+            <div class="health-label">${HEALTH_LABELS[key] || key.replace(/_/g, ' ')}</div>
             <div class="health-value">${display}</div>
           </div>`;
         }).join('');

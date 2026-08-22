@@ -244,7 +244,9 @@ def _health() -> dict:
         "rpc_connected": w3.is_connected(),
         "chain_id": w3.eth.chain_id,
         "contract_owner": contract.functions.owner().call(),
-        "total_on_chain_credits": contract.functions.totalCredits().call(),
+        # Lifetime counter on the shared testnet contract, including credits
+        # minted by earlier deployments — not a count of this platform's mints.
+        "contract_lifetime_credits": contract.functions.totalCredits().call(),
         "signing_configured": is_configured(),
     }
 

@@ -37,6 +37,38 @@ async def test_a_device_can_be_registered_to_an_installer(app_client, admin_toke
     assert response.json()["device_id"] == "REG-1"
 
 
+async def test_registered_devices_are_listed(app_client, admin_token, make_user):
+    """The admin panel needs to show what is already connected, not just add more."""
+    _, installer = await make_user("installer")
+    await app_client.post(
+        "/api/admin/devices",
+        headers=auth(admin_token),
+        json={"device_id": "LIST-1", "owner_email": installer["email"], "location": "Chennai"},
+    )
+
+    body = (await app_client.get("/api/admin/devices", headers=auth(admin_token))).json()
+    entry = next(d for d in body["devices"] if d["device_id"] == "LIST-1")
+    assert entry["owner_email"] == installer["email"]
+    assert entry["location"] == "Chennai"
+    assert entry["reading_count"] == 0
+    assert body["total"] >= 1
+
+
+async def test_the_device_list_is_admin_only(app_client, make_user):
+    token, _ = await make_user("installer")
+    assert (await app_client.get("/api/admin/devices", headers=auth(token))).status_code == 403
+
+
+async def test_health_separates_contract_total_from_platform_mints(app_client, admin_token):
+    """
+    The contract counter is cumulative across every deployment that has used it,
+    so a non-zero value there does not mean this platform minted anything.
+    """
+    body = (await app_client.get("/api/admin/system-health", headers=auth(admin_token))).json()
+    assert body["minted_by_this_platform"] == 0
+    assert "total_on_chain_credits" not in body
+
+
 async def test_a_duplicate_device_is_rejected(app_client, admin_token, make_user):
     _, installer = await make_user("installer")
     payload = {"device_id": "REG-DUP", "owner_email": installer["email"], "location": "Pune"}

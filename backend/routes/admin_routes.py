@@ -236,6 +236,25 @@ async def get_audit_log(page: int = 1, limit: int = 50, admin: dict = Depends(re
 
 # ── Device registration ────────────────────────────────────────────────────
 
+@router.get("/devices")
+async def list_devices(admin: dict = Depends(require_admin)):
+    """Every registered device with its owner and contribution to date."""
+    devices = await database.fetch_all(
+        """SELECT d.device_id, d.location, d.created_at,
+                  u.email AS owner_email,
+                  (SELECT COUNT(*) FROM generation_readings r
+                   WHERE r.device_id = d.device_id) AS reading_count,
+                  (SELECT COUNT(*) FROM credits c
+                   WHERE c.device_id = d.device_id) AS credit_count,
+                  (SELECT COALESCE(SUM(r.total_kwh), 0) FROM generation_readings r
+                   WHERE r.device_id = d.device_id) AS total_kwh
+           FROM devices d
+           LEFT JOIN users u ON d.owner_user_id = u.id
+           ORDER BY d.created_at DESC"""
+    )
+    return {"devices": [dict(d) for d in devices], "total": len(devices)}
+
+
 @router.post("/devices")
 async def register_device(req: DeviceRegistration, admin: dict = Depends(require_admin)):
     """Register a generation device against an existing installer account."""
@@ -396,8 +415,15 @@ async def system_health(admin: dict = Depends(require_admin)):
     try:
         credits = await database.fetch_one("SELECT COUNT(*) AS cnt FROM credits")
         users = await database.fetch_one("SELECT COUNT(*) AS cnt FROM users")
+        # The contract's counter is its lifetime total across every deployment
+        # that has ever used it, including earlier testing. Only credits this
+        # database has recorded an on-chain id for were minted by this platform.
+        minted = await database.fetch_one(
+            "SELECT COUNT(*) AS cnt FROM credits WHERE on_chain_id IS NOT NULL"
+        )
         health["db_credits"] = credits["cnt"]
         health["db_users"] = users["cnt"]
+        health["minted_by_this_platform"] = minted["cnt"]
     except Exception as exc:
         health["status"] = "error"
         health["db_error"] = str(exc)
