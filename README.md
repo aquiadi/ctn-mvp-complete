@@ -34,20 +34,68 @@ Buyers self-register from the sign-up form. Admin accounts cannot be — the rol
 is rejected at validation, so the only way to create one is with server access.
 
 **As an installer** — the dashboard shows generation, CO₂ avoided, credits, and
-their value, with the signed reading history behind them. Submit a device for
-approval, or list verified credits for sale.
+their value, with the signed reading history behind them. Pair a sensor with a
+code, or list verified credits for sale.
 
 **As a buyer** — browse the marketplace, reserve a batch, and complete a
 purchase. Reserve and confirm are separate steps, and a reservation expires
 after 15 minutes so an abandoned checkout cannot hold a credit hostage.
 
-**As an admin** — approve device submissions, ingest reading CSVs, mint and
+**As an admin** — confirm device installations, ingest reading CSVs, mint and
 retire credits on-chain, and read the audit trail. Every administrative action
 is recorded with who did it and why.
 
 **Without an account** — the landing page lists every issued credit. Click one
 to verify it: the API resolves its on-chain record and reports whether the
 contract and the database agree.
+
+---
+
+## Connecting a sensor
+
+A new seller connects hardware without anyone's help, and generation starts
+counting immediately.
+
+1. **Sign up** as an installer. No approval, no waiting.
+2. **Get a pairing code** from the dashboard — single use, valid an hour.
+3. **Flash the device** with WiFi credentials and that code.
+4. **Power it on.** It generates a keypair, enrols itself, and starts reporting.
+5. **Credits accrue** as one tonne of avoided CO₂ accumulates.
+
+```
+     ESP32 ──── WiFi ──── HTTPS ────▶  POST /api/v1/readings
+       │                                        │
+  signs each reading                   verifies the signature
+  with a key that                      against the registered
+  never leaves it                      public key
+```
+
+The device is the client, over ordinary WiFi. Nothing is wired, no gateway sits
+in between, and nothing has to be opened up on the seller's network — it works
+behind any home router.
+
+`firmware/ctn_sensor/` is a working ESP32 sketch. Measurement is isolated in one
+function, so a pulse meter, a CT clamp, or a Modbus inverter register all drop
+in without touching the transport or the cryptography.
+
+> [!NOTE]
+> The signing scheme and API contract are covered by the test suite and by
+> `tools/sensor_sim.py`. The sketch itself has not been run on physical
+> hardware — verify it on a bench before trusting it on a roof.
+
+### Earning versus selling
+
+Data flows the moment a device is paired. **Selling waits for a human.**
+
+A signature proves a reading came from a particular device and was not altered
+in transit. It cannot prove the device is measuring a real solar array — a
+bench-top ESP32 signs just as convincingly as a rooftop one. So credits from a
+self-enrolled device are issued as `pending` and cannot be listed; an operator
+confirms the installation and the accrued credits are released. They were always
+valid measurements, only their salability was in question.
+
+Set `TRUST_SELF_ENROLLED_DEVICES=true` to skip that gate for a closed pilot
+where every device is already known.
 
 ---
 
@@ -113,9 +161,19 @@ issuer can see would prove nothing to anyone else.
 from the published spec rather than importing the server's own module, so if it
 works, the spec is complete enough to write firmware against.
 
+As a seller pairing new hardware, which needs no admin access:
+
+```bash
+python tools/sensor_sim.py code --device ROOF-01 \
+    --email demo@installer.ctn --password demo-installer-2024
+python tools/sensor_sim.py pair   --device ROOF-01 --code CTN-XXXX-XXXX
+python tools/sensor_sim.py credit --device ROOF-01   # enough generation for one credit
+```
+
+Or as an operator registering a device directly:
+
 ```bash
 python tools/sensor_sim.py provision --device ROOF-01   # keypair; only the address is sent
-python tools/sensor_sim.py credit    --device ROOF-01   # enough signed generation for one credit
 python tools/sensor_sim.py attack    --device ROOF-01   # tampered, forged, replayed → 401, 401, 409
 python tools/sensor_sim.py verify    --device ROOF-01   # recover the signer locally
 ```
@@ -124,10 +182,11 @@ Private keys are written to `.sensor-keys/` (gitignored) — the closest local
 equivalent to a key that never leaves the device. Add `--api <url>` to point it
 at a deployed instance.
 
-**Imported readings are marked as such.** CSV upload still exists for meters
-that cannot sign. Those rows carry only a server-computed content hash, which
-proves nothing about origin, and the API and dashboard label them `imported`
-rather than attested.
+**CSV import is kept on purpose.** Signed ingestion is the real path, but CSV
+upload remains for testing, for backfilling history, and for meters that cannot
+sign. Those rows carry only a server-computed content hash, which proves nothing
+about origin, so the API and dashboard label them `imported` rather than
+attested — the distinction is visible rather than glossed over.
 
 ---
 
@@ -203,10 +262,13 @@ backend/
   data_utils.py               Cumulative meter readings → per-interval deltas
   ipfs_utils.py               Pinata certificate storage
   routes/                     auth · installer · marketplace · admin · ingest
-  tests/                      137 tests
+  tests/                      158 tests
+
+firmware/
+  ctn_sensor/                 ESP32 sketch: enrol, sign, report over WiFi
 
 tools/
-  sensor_sim.py               Reference client: provision, sign, submit, verify
+  sensor_sim.py               Reference client: pair, sign, submit, verify
 
 carboncredit-deploy/          Hardhat project for the CarbonCredit contract
 ```
@@ -246,7 +308,7 @@ listed or reserved, a buyer holding a reservation, or the last administrator.
 cd backend && ../.venv/bin/python -m pytest
 ```
 
-137 tests covering device attestation, authentication and role enforcement,
+158 tests covering device attestation, self-service onboarding, authentication and role enforcement,
 wallet-signature verification, credit issuance and idempotency, marketplace
 concurrency, device onboarding and approval, account transfer and closure, CSV
 validation, and the audit trail.
@@ -366,9 +428,10 @@ state, but not a production carbon registry.
 - **Not yet multi-tenant.** One platform instance serves one operator. Offering
   this as a service others plug into needs organisation isolation, per-tenant
   API scoping, and client libraries.
-- **Device provisioning is admin-mediated.** Key registration goes through an
-  approval queue by design; automated enrolment with hardware attestation
-  (secure element or TPM) would remove the human step without weakening it.
+- **Installation confirmation is manual.** Devices self-enrol, but an operator
+  confirms the installation before credits can be sold. A secure element with a
+  manufacturer attestation key would let that step be automated rather than
+  merely skipped.
 - **Testnet only.** Amoy, not Polygon mainnet.
 - **The methodology is not accredited.** CO₂ is derived from the CEA grid
   emission factor; `CTN-SOLAR-V1` is this project's own standard, not Gold

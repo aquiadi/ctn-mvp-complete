@@ -33,6 +33,8 @@ os.environ.update(
         # test sets its own.
         "LOGIN_RATE_LIMIT": "1000/minute",
         "SIGNUP_RATE_LIMIT": "1000/minute",
+        "INGEST_RATE_LIMIT": "10000/minute",
+        "ENROLL_RATE_LIMIT": "10000/minute",
         "PINATA_API_KEY": "",
         "PINATA_SECRET": "",
     }

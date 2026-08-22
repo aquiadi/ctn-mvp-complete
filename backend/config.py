@@ -138,6 +138,17 @@ CHAIN_WRITE_RATE_LIMIT = os.getenv("CHAIN_WRITE_RATE_LIMIT", "2/minute")
 # permissive than the human-facing limits. Replay protection, not throttling,
 # is what stops a device flooding the ledger.
 INGEST_RATE_LIMIT = os.getenv("INGEST_RATE_LIMIT", "120/minute")
+ENROLL_RATE_LIMIT = os.getenv("ENROLL_RATE_LIMIT", "10/minute")
+
+# A pairing code is a bearer credential typed into firmware, so it is short
+# lived and single use. Long enough to flash a device, short enough that a
+# leaked code is not a standing liability.
+ENROLLMENT_CODE_TTL_MINUTES = _int("ENROLLMENT_CODE_TTL_MINUTES", 60)
+
+# Whether a self-enrolled device's credits can be sold before an operator has
+# confirmed the installation. Off by default: attestation proves origin, not
+# that the meter is measuring real generation.
+TRUST_SELF_ENROLLED_DEVICES = _bool("TRUST_SELF_ENROLLED_DEVICES", False)
 
 
 # ── Seeding ────────────────────────────────────────────────────────────────

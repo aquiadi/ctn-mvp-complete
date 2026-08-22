@@ -10,6 +10,8 @@ Everything here is versioned under /api/v1 because firmware, once deployed to a
 roof, cannot be redeployed as easily as this server.
 """
 
+import re
+import time
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -49,6 +51,114 @@ class ReadingBatch(BaseModel):
     """
 
     readings: List[SignedReading] = Field(..., min_length=1, max_length=500)
+
+
+class DeviceEnrollment(BaseModel):
+    """A device claiming a pairing code and registering the key it generated."""
+
+    enrollment_code: str = Field(..., min_length=8, max_length=64)
+    device_id: str = Field(..., min_length=3, max_length=64)
+    public_key: str = Field(..., min_length=40, max_length=64)
+
+    @field_validator("enrollment_code", "device_id", "public_key")
+    @classmethod
+    def strip(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("device_id")
+    @classmethod
+    def validate_device_id(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", value):
+            raise ValueError(
+                "Device ID may contain only letters, numbers, dots, dashes, and underscores."
+            )
+        return value
+
+    @field_validator("public_key")
+    @classmethod
+    def validate_public_key(cls, value: str) -> str:
+        return attestation.normalise_public_key(value)
+
+
+# ── Enrollment ─────────────────────────────────────────────────────────────
+
+@router.post("/devices/enroll")
+@limiter.limit(config.ENROLL_RATE_LIMIT)
+async def enroll_device(request: Request, req: DeviceEnrollment):
+    """
+    Register a device against a seller's pairing code.
+
+    Called by the device itself on first boot, after it has generated a keypair
+    it will never disclose. The code proves the seller authorised this hardware;
+    the key it submits is what every later reading is checked against.
+
+    Unauthenticated by design — a sensor cannot hold a login, and the code is
+    single use and short lived precisely so it can be embedded in firmware.
+    """
+    now = time.time()
+
+    async with database.transaction():
+        enrollment = await database.fetch_one(
+            query="""SELECT id, owner_user_id, label, location, expires_at, used_at
+                     FROM device_enrollments WHERE code = :code""",
+            values={"code": req.enrollment_code},
+        )
+        if not enrollment:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "That pairing code does not exist."
+            )
+
+        enrollment = dict(enrollment)
+        if enrollment["used_at"]:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "That pairing code has already been used. Generate a new one to add another device.",
+            )
+        if enrollment["expires_at"] < now:
+            raise HTTPException(
+                status.HTTP_410_GONE,
+                "That pairing code has expired. Generate a new one from your dashboard.",
+            )
+
+        taken = await database.fetch_one(
+            query="SELECT id FROM devices WHERE device_id = :device_id",
+            values={"device_id": req.device_id},
+        )
+        if taken:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Device '{req.device_id}' is already registered. Choose a different id.",
+            )
+
+        await database.execute(
+            query="""INSERT INTO devices
+                     (device_id, owner_user_id, location, public_key, enrolled_via, verified)
+                     VALUES (:device_id, :owner_id, :location, :public_key, 'pairing_code', 0)""",
+            values={
+                "device_id": req.device_id,
+                "owner_id": enrollment["owner_user_id"],
+                "location": enrollment["location"] or "India",
+                "public_key": req.public_key,
+            },
+        )
+        await database.execute(
+            query="""UPDATE device_enrollments
+                     SET used_at = :now, device_id = :device_id WHERE id = :id""",
+            values={"now": now, "device_id": req.device_id, "id": enrollment["id"]},
+        )
+
+    return {
+        "status": "enrolled",
+        "device_id": req.device_id,
+        "public_key": req.public_key,
+        "verified": False,
+        "next_sequence": 1,
+        "message": (
+            "Device enrolled. Start posting signed readings to /api/v1/readings. "
+            "Credits accrue immediately but cannot be sold until an operator has "
+            "confirmed the installation."
+        ),
+    }
 
 
 # ── Ingestion ──────────────────────────────────────────────────────────────
@@ -197,7 +307,8 @@ async def device_public_record(device_id: str):
     proves nothing to anyone else.
     """
     device = await database.fetch_one(
-        query="""SELECT device_id, location, public_key, last_sequence, created_at
+        query="""SELECT device_id, location, public_key, last_sequence, created_at,
+                        verified, enrolled_via
                  FROM devices WHERE device_id = :device_id""",
         values={"device_id": device_id},
     )
@@ -217,6 +328,8 @@ async def device_public_record(device_id: str):
         "location": device["location"],
         "public_key": device["public_key"],
         "attestation_enabled": bool(device["public_key"]),
+        "verified": bool(device["verified"]),
+        "enrolled_via": device["enrolled_via"] or "operator",
         "last_sequence": device["last_sequence"],
         "readings_total": counts["total"],
         "readings_attested": counts["attested"],
@@ -317,6 +430,11 @@ def ingestion_spec():
     return {
         "message_version": attestation.MESSAGE_VERSION,
         "signature_scheme": "EIP-191 personal_sign over secp256k1",
+        "signature_format": (
+            "0x-prefixed r||s (64 bytes), with or without a trailing recovery id. "
+            "Embedded libraries that cannot derive the recovery id may omit it; "
+            "both possibilities are tried."
+        ),
         "key_format": "0x-prefixed 20-byte address derived from the device signing key",
         "kwh_decimals": attestation.KWH_DECIMALS,
         "canonical_message_template": (

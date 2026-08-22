@@ -54,17 +54,58 @@ def canonical_message(
     )
 
 
-def recover_signer(message: str, signature: str) -> str:
+def _candidate_signatures(signature: str) -> list[bytes]:
+    """
+    Signature forms to attempt, most likely first.
+
+    A full Ethereum signature is 65 bytes: r, s, and a recovery id. Embedded
+    secp256k1 libraries — micro-ecc among them — produce only the 64-byte r||s
+    and expose no way to derive the recovery id, so requiring it would mean
+    every firmware author reimplementing point recovery to guess a single byte.
+
+    A 65-byte signature is used as given. A 64-byte one is tried under both
+    possible recovery ids, which costs one extra elliptic-curve operation and
+    removes an entire class of firmware bug.
+    """
+    raw = bytes.fromhex(signature[2:] if signature.startswith("0x") else signature)
+
+    if len(raw) == 65:
+        return [raw]
+    if len(raw) == 64:
+        return [raw + bytes([27]), raw + bytes([28])]
+
+    raise AttestationError(
+        f"Signature must be 64 or 65 bytes, got {len(raw)}."
+    )
+
+
+def recover_signer(message: str, signature: str, expected: str = None) -> str:
     """
     Recover the address that produced `signature` over `message`.
 
     Uses EIP-191 personal_sign, which every wallet, hardware signer, and
-    embedded secp256k1 library already implements.
+    embedded secp256k1 library already implements. When `expected` is given and
+    the signature omits its recovery id, the candidate matching that address is
+    returned; otherwise the first that decodes is.
     """
-    try:
-        return Account.recover_message(encode_defunct(text=message), signature=signature)
-    except Exception as exc:
-        raise AttestationError(f"Signature could not be decoded: {exc}") from exc
+    signable = encode_defunct(text=message)
+    candidates = _candidate_signatures(signature)
+
+    recovered_any = None
+    for candidate in candidates:
+        try:
+            recovered = Account.recover_message(signable, signature=candidate)
+        except Exception:
+            continue
+
+        recovered_any = recovered_any or recovered
+        if expected is None or recovered.lower() == expected.lower():
+            return recovered
+
+    if recovered_any:
+        return recovered_any
+
+    raise AttestationError("Signature could not be decoded.")
 
 
 def verify_reading(
@@ -82,7 +123,7 @@ def verify_reading(
     independent re-verification. Raises AttestationError otherwise.
     """
     message = canonical_message(device_id, sequence, timestamp, delta_kwh)
-    recovered = recover_signer(message, signature)
+    recovered = recover_signer(message, signature, expected=device_public_key)
 
     if recovered.lower() != device_public_key.lower():
         raise AttestationError(

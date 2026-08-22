@@ -113,6 +113,43 @@ def cmd_provision(args):
         timeout=30))
 
 
+def cmd_pair(args):
+    """
+    The newcomer path: redeem a pairing code, exactly as an ESP32 would.
+
+    Unlike `provision`, this needs no admin access — the seller's own code is
+    what authorises the device.
+    """
+    account = Account.create()
+    save_device(args.device, account.key.hex(), account.address)
+
+    print(f"Generated keypair on the 'device' for {args.device}")
+    print(f"  address     : {account.address}   (sent)")
+    print(f"  private key : {key_path(args.device)}   (never sent)")
+
+    show("Enrolling with pairing code", requests.post(
+        f"{args.api}/api/v1/devices/enroll",
+        json={"enrollment_code": args.code, "device_id": args.device,
+              "public_key": account.address},
+        timeout=30))
+
+
+def cmd_code(args):
+    """Ask for a pairing code as the seller would from their dashboard."""
+    response = requests.post(
+        f"{args.api}/api/auth/login",
+        json={"email": args.email, "password": args.password}, timeout=30)
+    if response.status_code != 200:
+        sys.exit(f"Login failed ({response.status_code}) for {args.email}")
+
+    token = response.json()["token"]
+    show("Pairing code", requests.post(
+        f"{args.api}/api/installer/enrollment-codes",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"label": args.device, "location": args.location},
+        timeout=30))
+
+
 def cmd_send(args):
     """Sign and submit readings, exactly as firmware would."""
     device = load_device(args.device)
@@ -250,6 +287,18 @@ def main():
     p.add_argument("--owner", default="demo@installer.ctn")
     p.add_argument("--location", default="Simulated Site")
     p.set_defaults(func=cmd_provision)
+
+    p = sub.add_parser("code", parents=[common],
+                       help="get a pairing code as a seller (no admin needed)")
+    p.add_argument("--email", default="demo@installer.ctn")
+    p.add_argument("--password", default="demo-installer-2024")
+    p.add_argument("--location", default="Simulated Site")
+    p.set_defaults(func=cmd_code)
+
+    p = sub.add_parser("pair", parents=[common],
+                       help="enrol using a pairing code, as an ESP32 would")
+    p.add_argument("--code", required=True, help="pairing code from `code`")
+    p.set_defaults(func=cmd_pair)
 
     p = sub.add_parser("send", parents=[common], help="sign and submit readings")
     p.add_argument("--kwh", type=float, default=0.61)

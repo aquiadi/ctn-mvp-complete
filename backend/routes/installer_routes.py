@@ -5,6 +5,7 @@ Every query is scoped to the authenticated installer's own records.
 """
 
 import re
+import secrets
 import time
 from typing import List, Optional
 
@@ -56,6 +57,18 @@ class DeviceRequestSubmission(BaseModel):
                 "Device ID may contain only letters, numbers, dots, dashes, and underscores."
             )
         return value
+
+
+class EnrollmentCodeRequest(BaseModel):
+    """A seller asking for a pairing code to flash into a new device."""
+
+    label: str = Field(default="", max_length=64)
+    location: str = Field(default="India", max_length=120)
+
+    @field_validator("label", "location")
+    @classmethod
+    def strip(cls, value: str) -> str:
+        return value.strip()
 
 
 def _paginate(page: int, limit: int, cap: int = 200) -> tuple[int, int, int]:
@@ -285,6 +298,74 @@ async def list_device_requests(user: dict = Depends(require_installer)):
         values={"user_id": user["id"]},
     )
     return {"requests": [dict(r) for r in requests]}
+
+
+@router.post("/enrollment-codes")
+async def create_enrollment_code(
+    req: EnrollmentCodeRequest, user: dict = Depends(require_installer)
+):
+    """
+    Issue a single-use pairing code for a new device.
+
+    The seller flashes this into firmware alongside their WiFi details. On first
+    boot the device generates its own keypair and redeems the code, which binds
+    it to this account without the private key ever existing anywhere else.
+
+    The code is the only thing proving the device belongs to this seller, so it
+    is short lived and cannot be reused.
+    """
+    code = f"CTN-{secrets.token_hex(4).upper()}-{secrets.token_hex(4).upper()}"
+    expires_at = time.time() + config.ENROLLMENT_CODE_TTL_MINUTES * 60
+
+    await db_execute_with_retry(
+        query="""INSERT INTO device_enrollments
+                 (code, owner_user_id, label, location, expires_at)
+                 VALUES (:code, :owner_id, :label, :location, :expires_at)""",
+        values={
+            "code": code,
+            "owner_id": user["id"],
+            "label": req.label or None,
+            "location": req.location or "India",
+            "expires_at": expires_at,
+        },
+    )
+
+    return {
+        "status": "created",
+        "enrollment_code": code,
+        "expires_at": expires_at,
+        "expires_in_minutes": config.ENROLLMENT_CODE_TTL_MINUTES,
+        "message": (
+            "Flash this code into your device along with your WiFi credentials. "
+            "It enrolls itself on first boot and starts reporting immediately."
+        ),
+    }
+
+
+@router.get("/enrollment-codes")
+async def list_enrollment_codes(user: dict = Depends(require_installer)):
+    """Pairing codes issued by this seller and whether each has been redeemed."""
+    now = time.time()
+    codes = await database.fetch_all(
+        query="""SELECT code, label, location, created_at, expires_at, used_at, device_id
+                 FROM device_enrollments WHERE owner_user_id = :user_id
+                 ORDER BY created_at DESC LIMIT 50""",
+        values={"user_id": user["id"]},
+    )
+
+    return {
+        "codes": [
+            {
+                **dict(c),
+                "status": (
+                    "redeemed" if c["used_at"]
+                    else "expired" if c["expires_at"] < now
+                    else "waiting"
+                ),
+            }
+            for c in codes
+        ]
+    }
 
 
 @router.post("/sell")

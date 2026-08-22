@@ -282,7 +282,7 @@ async def list_devices(admin: dict = Depends(require_admin)):
     """Every registered device with its owner and contribution to date."""
     devices = await database.fetch_all(
         """SELECT d.device_id, d.location, d.created_at,
-                  d.public_key, d.last_sequence,
+                  d.public_key, d.last_sequence, d.verified, d.enrolled_via,
                   u.email AS owner_email,
                   (SELECT COUNT(*) FROM generation_readings r
                    WHERE r.device_id = d.device_id) AS reading_count,
@@ -481,6 +481,64 @@ async def reject_device_request(
         "status": "rejected",
         "device_id": record["device_id"],
         "message": f"Request for {record['device_id']} was declined.",
+    }
+
+
+@router.post("/devices/{device_id}/verify")
+async def verify_device(
+    device_id: str, req: DeviceReview, admin: dict = Depends(require_admin)
+):
+    """
+    Confirm a device's installation is real, releasing its credits for sale.
+
+    Attestation already proves each reading came from this device unaltered.
+    What it cannot show is that the device is measuring a genuine solar array
+    rather than a bench supply, so that judgement stays with a person. Credits
+    already accrued are promoted here rather than being reissued, since they
+    were always valid measurements — only their salability was in question.
+    """
+    device = await database.fetch_one(
+        query="SELECT device_id, verified, public_key FROM devices WHERE device_id = :id",
+        values={"id": device_id},
+    )
+    if not device:
+        raise HTTPException(404, f"Device '{device_id}' not found")
+    if device["verified"]:
+        raise HTTPException(409, f"Device '{device_id}' is already verified.")
+    if len(req.note) < 5:
+        raise HTTPException(
+            400, "Record how the installation was confirmed (at least 5 characters)."
+        )
+
+    now = time.time()
+    async with database.transaction():
+        await database.execute(
+            query="""UPDATE devices SET verified = 1, verified_at = :now, verified_by = :admin
+                     WHERE device_id = :id""",
+            values={"now": now, "admin": admin["id"], "id": device_id},
+        )
+        promoted = await database.fetch_all(
+            query="""SELECT id FROM credits
+                     WHERE device_id = :id AND status = 'pending'""",
+            values={"id": device_id},
+        )
+        if promoted:
+            await database.execute(
+                query="""UPDATE credits SET status = 'verified'
+                         WHERE device_id = :id AND status = 'pending'""",
+                values={"id": device_id},
+            )
+
+    await log_admin_action(
+        admin["id"], "verify_device", "device", device_id, req.note,
+        f"released {len(promoted)} pending credit(s)",
+    )
+
+    return {
+        "status": "verified",
+        "device_id": device_id,
+        "credits_released": len(promoted),
+        "message": f"{device_id} verified; {len(promoted)} credit(s) are now sellable.",
     }
 
 

@@ -191,6 +191,51 @@ async def test_altering_the_timestamp_is_refused(app_client, admin_token, make_u
     assert (await _post(app_client, [reading])).status_code == 401
 
 
+async def test_a_signature_without_a_recovery_id_is_accepted(
+    app_client, admin_token, make_user
+):
+    """
+    Embedded secp256k1 libraries produce r||s and cannot derive the recovery id.
+    Requiring it would make every firmware author reimplement point recovery to
+    guess one byte, so both possibilities are tried instead.
+    """
+    sensor = SimulatedSensor("ATT-64BYTE")
+    await _register(app_client, admin_token, make_user, sensor)
+
+    reading = sensor.reading(0.61)
+    raw = reading["signature"]
+    raw = raw[2:] if raw.startswith("0x") else raw
+    reading["signature"] = "0x" + raw[:128]      # drop the trailing v
+
+    response = await _post(app_client, [reading])
+    assert response.status_code == 200, response.text
+
+
+async def test_a_tampered_64_byte_signature_is_still_refused(
+    app_client, admin_token, make_user
+):
+    """Trying both recovery ids must not become a way in for altered data."""
+    sensor = SimulatedSensor("ATT-64TAMPER")
+    await _register(app_client, admin_token, make_user, sensor)
+
+    reading = sensor.reading(0.61)
+    raw = reading["signature"]
+    raw = raw[2:] if raw.startswith("0x") else raw
+    reading["signature"] = "0x" + raw[:128]
+    reading["delta_kwh"] = 500.0
+
+    assert (await _post(app_client, [reading])).status_code == 401
+
+
+async def test_a_malformed_signature_length_is_refused(app_client, admin_token, make_user):
+    sensor = SimulatedSensor("ATT-BADLEN")
+    await _register(app_client, admin_token, make_user, sensor)
+
+    reading = sensor.reading(0.61)
+    reading["signature"] = "0x" + "ab" * 40      # neither 64 nor 65 bytes
+    assert (await _post(app_client, [reading])).status_code in (401, 422)
+
+
 async def test_a_garbage_signature_is_refused(app_client, admin_token, make_user):
     sensor = SimulatedSensor("ATT-GARBAGE")
     await _register(app_client, admin_token, make_user, sensor)

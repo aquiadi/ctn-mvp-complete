@@ -95,6 +95,14 @@ CREATE TABLE IF NOT EXISTS devices (
     public_key TEXT,
     -- Highest sequence accepted so far; a replayed packet cannot exceed it.
     last_sequence INTEGER NOT NULL DEFAULT 0,
+    -- A self-enrolled device records immediately but its credits cannot be sold
+    -- until an operator has confirmed the installation is real. Attestation
+    -- proves a reading came from this device; it cannot prove the device is
+    -- pointed at a real solar array.
+    verified INTEGER NOT NULL DEFAULT 0,
+    verified_at REAL,
+    verified_by INTEGER REFERENCES users(id),
+    enrolled_via TEXT,
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 
@@ -187,6 +195,18 @@ CREATE TABLE IF NOT EXISTS wallet_nonces (
     used INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS device_enrollments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT UNIQUE NOT NULL,
+    owner_user_id INTEGER NOT NULL REFERENCES users(id),
+    label TEXT,
+    location TEXT DEFAULT 'India',
+    created_at REAL NOT NULL DEFAULT (strftime('%s', 'now')),
+    expires_at REAL NOT NULL,
+    used_at REAL,
+    device_id TEXT
+);
+
 CREATE TABLE IF NOT EXISTS device_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     device_id TEXT NOT NULL,
@@ -215,6 +235,8 @@ CREATE INDEX IF NOT EXISTS idx_credits_on_chain ON credits(on_chain_id);
 CREATE INDEX IF NOT EXISTS idx_readings_owner ON generation_readings(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_readings_unconsumed ON generation_readings(consumed_by_credit_id);
 CREATE INDEX IF NOT EXISTS idx_readings_attested ON generation_readings(device_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_enrollments_code ON device_enrollments(code);
+CREATE INDEX IF NOT EXISTS idx_enrollments_owner ON device_enrollments(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_device_requests_status ON device_requests(status);
 CREATE INDEX IF NOT EXISTS idx_device_requests_user ON device_requests(requested_by);
 CREATE INDEX IF NOT EXISTS idx_audit_admin ON audit_log(admin_user_id);
@@ -227,6 +249,10 @@ MIGRATIONS = {
     "devices": {
         "public_key": "TEXT",
         "last_sequence": "INTEGER NOT NULL DEFAULT 0",
+        "verified": "INTEGER NOT NULL DEFAULT 0",
+        "verified_at": "REAL",
+        "verified_by": "INTEGER",
+        "enrolled_via": "TEXT",
     },
     "generation_readings": {
         "device_signature": "TEXT",
@@ -390,6 +416,25 @@ async def _insert_readings(readings: Iterable[dict], owner_user_id: int) -> int:
     return inserted
 
 
+async def _device_is_verified(device_id: str) -> bool:
+    """
+    Whether an operator has confirmed this device's installation.
+
+    Attestation proves a reading came from a particular device and was not
+    altered. It cannot prove the device is measuring a real solar array — a
+    signed reading from a bench-top ESP32 verifies perfectly. Confirming the
+    installation is a human step, and credits stay unsellable until it happens.
+    """
+    if config.TRUST_SELF_ENROLLED_DEVICES:
+        return True
+
+    row = await database.fetch_one(
+        query="SELECT verified FROM devices WHERE device_id = :device_id",
+        values={"device_id": device_id},
+    )
+    return bool(row and row["verified"])
+
+
 async def _issue_credit(
     device_id: str,
     owner_user_id: int,
@@ -403,8 +448,10 @@ async def _issue_credit(
     from ipfs_utils import upload_credit_to_ipfs
 
     credit_id = await _next_credit_id()
+    status = "verified" if await _device_is_verified(device_id) else "pending"
     certificate = {
         "credit_id": credit_id,
+        "device_verified": status == "verified",
         "device_id": device_id,
         "owner_user_id": owner_user_id,
         "total_kwh": total_kwh,
@@ -424,7 +471,7 @@ async def _issue_credit(
              status, contributing_readings, ipfs_hash)
             VALUES (:credit_id, :device_id, :owner_user_id, :total_kwh, :co2_avoided_kg,
                     :period_start, :period_end, :methodology, :standard, :location,
-                    'verified', :contributing_readings, :ipfs_hash)""",
+                    :status, :contributing_readings, :ipfs_hash)""",
         values={
             "credit_id": credit_id,
             "device_id": device_id,
@@ -436,6 +483,7 @@ async def _issue_credit(
             "methodology": config.METHODOLOGY,
             "standard": config.STANDARD,
             "location": location,
+            "status": status,
             "contributing_readings": json.dumps(contributing),
             "ipfs_hash": upload_credit_to_ipfs(certificate),
         },
