@@ -27,3 +27,4 @@ cookie.txt
 .DS_Store
 .idea/
 .vscode/
+.sensor-keys/

@@ -107,6 +107,23 @@ Account.recover_message(
 Device keys are public at `GET /api/v1/devices/{device_id}` — a key only the
 issuer can see would prove nothing to anyone else.
 
+### Trying it
+
+`tools/sensor_sim.py` is a reference client. It implements the signing scheme
+from the published spec rather than importing the server's own module, so if it
+works, the spec is complete enough to write firmware against.
+
+```bash
+python tools/sensor_sim.py provision --device ROOF-01   # keypair; only the address is sent
+python tools/sensor_sim.py credit    --device ROOF-01   # enough signed generation for one credit
+python tools/sensor_sim.py attack    --device ROOF-01   # tampered, forged, replayed → 401, 401, 409
+python tools/sensor_sim.py verify    --device ROOF-01   # recover the signer locally
+```
+
+Private keys are written to `.sensor-keys/` (gitignored) — the closest local
+equivalent to a key that never leaves the device. Add `--api <url>` to point it
+at a deployed instance.
+
 **Imported readings are marked as such.** CSV upload still exists for meters
 that cannot sign. Those rows carry only a server-computed content hash, which
 proves nothing about origin, and the API and dashboard label them `imported`
@@ -187,6 +204,9 @@ backend/
   ipfs_utils.py               Pinata certificate storage
   routes/                     auth · installer · marketplace · admin · ingest
   tests/                      137 tests
+
+tools/
+  sensor_sim.py               Reference client: provision, sign, submit, verify
 
 carboncredit-deploy/          Hardhat project for the CarbonCredit contract
 ```
