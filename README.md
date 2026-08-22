@@ -296,7 +296,7 @@ backend/
   data_utils.py               Cumulative meter readings → per-interval deltas
   ipfs_utils.py               Pinata certificate storage
   routes/                     auth · installer · marketplace · admin · ingest
-  tests/                      173 tests
+  tests/                      177 tests
 
 firmware/
   ctn_sensor/                 ESP32 sketch: enrol, sign, report over WiFi
@@ -342,10 +342,10 @@ listed or reserved, a buyer holding a reservation, or the last administrator.
 cd backend && ../.venv/bin/python -m pytest
 ```
 
-173 tests covering device attestation, self-service onboarding, authentication and role enforcement,
-wallet-signature verification, credit issuance and idempotency, marketplace
-concurrency, device onboarding and approval, account transfer and closure, CSV
-validation, and the audit trail.
+177 tests covering device attestation, self-service onboarding, authentication
+and role enforcement, wallet-signature verification, credit issuance and
+idempotency, marketplace concurrency, account transfer and closure, spreadsheet
+interpretation, and the audit trail.
 
 The attestation tests drive a simulated sensor — a real keypair and the
 reference signing routine — and assert that forged, tampered, and replayed
@@ -450,6 +450,26 @@ builder, after which Railway builds with `backend/` as the context and the
 
 ---
 
+## Where a credit's trust comes from
+
+Each layer answers a different question, and none of them substitutes for
+another. The interface states which apply to any given credit rather than
+implying the strongest.
+
+| Question | Answered by | Not answered by it |
+|---|---|---|
+| Did this reading come from this device, unaltered? | Device signature | Whether the device measures anything real |
+| Is this device a genuine installation? | An operator confirming it | Anything cryptographic |
+| Has this credit been double-counted? | Readings are consumed once, sequences are monotonic | — |
+| Does the ledger match the chain? | `/verify/{id}` compares both | Whether the input was honest |
+| Is the methodology sound? | Nothing here — see limitations | — |
+
+An uploaded spreadsheet clears none of the first row, which is why those
+readings are labelled `imported` and their credits gated the same way a
+self-enrolled device's are.
+
+---
+
 ## Known limitations
 
 Honest about what this is — an MVP with real cryptography and real on-chain
@@ -469,7 +489,14 @@ state, but not a production carbon registry.
 - **Testnet only.** Amoy, not Polygon mainnet.
 - **The methodology is not accredited.** CO₂ is derived from the CEA grid
   emission factor; `CTN-SOLAR-V1` is this project's own standard, not Gold
-  Standard or Verra.
+  Standard or Verra. This is the largest gap between this and a real registry:
+  the cryptography is sound, but nothing here makes the *accounting* official.
+- **Deploys briefly interrupt the API.** One instance, restarted in place, so
+  there is a sub-minute window on every push. The frontend reconnects on its
+  own rather than showing stale or invented figures.
+- **The ESP32 sketch is unverified on hardware.** The signing scheme it
+  implements is covered by the test suite and the reference client, but the
+  sketch itself has not been run on a device.
 
 ---
 
