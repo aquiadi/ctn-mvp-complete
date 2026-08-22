@@ -4,15 +4,16 @@ CTN Installer routes — dashboard, credits, readings, devices, listing, history
 Every query is scoped to the authenticated installer's own records.
 """
 
+import re
 import time
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import config
 from auth import require_installer
-from database import database
+from database import database, db_execute_with_retry
 
 router = APIRouter(prefix="/api/installer", tags=["installer"])
 
@@ -21,6 +22,28 @@ VALID_STATUSES = {"pending", "verified", "listed", "reserved", "sold", "retired"
 
 class SellRequest(BaseModel):
     credit_ids: List[int] = Field(..., min_length=1, max_length=1000)
+
+
+class DeviceRequestSubmission(BaseModel):
+    """An installer asking for a generation device to be added to the platform."""
+
+    device_id: str = Field(..., min_length=3, max_length=64)
+    location: str = Field(default="India", max_length=120)
+    notes: str = Field(default="", max_length=500)
+
+    @field_validator("device_id", "location", "notes")
+    @classmethod
+    def strip(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("device_id")
+    @classmethod
+    def validate_device_id(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", value):
+            raise ValueError(
+                "Device ID may contain only letters, numbers, dots, dashes, and underscores."
+            )
+        return value
 
 
 def _paginate(page: int, limit: int, cap: int = 200) -> tuple[int, int, int]:
@@ -179,6 +202,71 @@ async def installer_devices(user: dict = Depends(require_installer)):
         values={"user_id": user["id"]},
     )
     return {"devices": [dict(d) for d in devices]}
+
+
+@router.post("/device-requests")
+async def submit_device_request(
+    req: DeviceRequestSubmission, user: dict = Depends(require_installer)
+):
+    """
+    Ask for a device to be added under this installer's account.
+
+    Requests are reviewed by an administrator rather than taking effect
+    immediately: a credit's integrity depends on its device being attested, so
+    self-registering a device would amount to self-issuing carbon credits.
+    """
+    taken = await database.fetch_one(
+        "SELECT id FROM devices WHERE device_id = :device_id",
+        {"device_id": req.device_id},
+    )
+    if taken:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Device '{req.device_id}' is already registered on the platform.",
+        )
+
+    pending = await database.fetch_one(
+        """SELECT id FROM device_requests
+           WHERE device_id = :device_id AND status = 'pending'""",
+        {"device_id": req.device_id},
+    )
+    if pending:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"A request for '{req.device_id}' is already awaiting review.",
+        )
+
+    request_id = await db_execute_with_retry(
+        query="""INSERT INTO device_requests (device_id, requested_by, location, notes)
+                 VALUES (:device_id, :requested_by, :location, :notes)""",
+        values={
+            "device_id": req.device_id,
+            "requested_by": user["id"],
+            "location": req.location or "India",
+            "notes": req.notes or None,
+        },
+    )
+
+    return {
+        "status": "pending_review",
+        "request_id": request_id,
+        "device_id": req.device_id,
+        "message": "Your device has been submitted for review. "
+                   "It starts recording generation once an administrator approves it.",
+    }
+
+
+@router.get("/device-requests")
+async def list_device_requests(user: dict = Depends(require_installer)):
+    """This installer's submissions and where each one stands."""
+    requests = await database.fetch_all(
+        query="""SELECT id, device_id, location, notes, status,
+                        review_note, reviewed_at, created_at
+                 FROM device_requests WHERE requested_by = :user_id
+                 ORDER BY created_at DESC""",
+        values={"user_id": user["id"]},
+    )
+    return {"requests": [dict(r) for r in requests]}
 
 
 @router.post("/sell")

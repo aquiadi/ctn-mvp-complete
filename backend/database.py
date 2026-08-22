@@ -175,6 +175,22 @@ CREATE TABLE IF NOT EXISTS wallet_nonces (
     used INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS device_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    requested_by INTEGER NOT NULL REFERENCES users(id),
+    location TEXT DEFAULT 'India',
+    notes TEXT,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'rejected')),
+    reviewed_by INTEGER REFERENCES users(id),
+    reviewed_at REAL,
+    review_note TEXT,
+    created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_requests_status ON device_requests(status);
+CREATE INDEX IF NOT EXISTS idx_device_requests_user ON device_requests(requested_by);
 CREATE INDEX IF NOT EXISTS idx_credits_owner ON credits(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_credits_status ON credits(status);
 CREATE INDEX IF NOT EXISTS idx_credits_device ON credits(device_id);

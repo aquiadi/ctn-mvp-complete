@@ -145,6 +145,15 @@
     }
     .sig-chip { margin-left: 8px; font-size: 10px; color: var(--green); background: var(--green-light); padding: 2px 6px; border-radius: 4px; }
     .list-empty { font-size: 12px; color: var(--text3); padding: 1rem 0; }
+    .device-add { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+    .device-add-title { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text3); margin-bottom: 0.4rem; }
+    .device-add-help { font-size: 11px; color: var(--text2); line-height: 1.5; margin-bottom: 0.6rem; }
+    .device-add-row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+    .device-add-row input { flex: 1 1 160px; }
+    .device-add input { width: 100%; padding: 0.5rem 0.7rem; border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; background: var(--bg); color: var(--text); }
+    .device-result { font-size: 11px; margin-top: 0.5rem; line-height: 1.5; }
+    .device-result.ok { color: var(--green); }
+    .device-result.err { color: var(--red); }
   </style>
 </head>
 <body>
@@ -344,24 +353,45 @@
         ${paginatedCard('readings', 'Generation History')}
         ${paginatedCard('credits', 'Sellable Credits (1 tonne each)')}`;
 
-      if (state.dashboard.devices.length) {
-        html += `
-          <div class="card fade-up fade-up-4">
-            <div class="card-title">Your devices</div>
-            ${state.dashboard.devices.map(d => `
-              <div class="device-item">
-                <div>
-                  <div class="device-id">${esc(d.device_id)}</div>
-                  <div class="device-meta">${esc(d.location || 'Unknown location')}</div>
-                </div>
-                <span class="badge badge-verified">Active</span>
-              </div>`).join('')}
-          </div>`;
-      }
+      html += `
+        <div class="card fade-up fade-up-4">
+          <div class="card-title">Your devices</div>
+          ${state.dashboard.devices.length
+            ? state.dashboard.devices.map(d => `
+                <div class="device-item">
+                  <div>
+                    <div class="device-id">${esc(d.device_id)}</div>
+                    <div class="device-meta">${esc(d.location || 'Unknown location')}</div>
+                  </div>
+                  <span class="badge badge-verified">Active</span>
+                </div>`).join('')
+            : '<div class="list-empty">No active devices yet.</div>'}
+
+          <div id="device-requests"></div>
+
+          <div class="device-add">
+            <div class="device-add-title">Add a device</div>
+            <p class="device-add-help">
+              Submit your generation device for review. An administrator verifies it
+              before it starts recording — credits have to be traceable to an
+              attested device, so this step is not automatic.
+            </p>
+            <div class="device-add-row">
+              <input id="new-device-id" placeholder="Device ID (e.g. INV-2401-7788)">
+              <input id="new-device-location" placeholder="Location">
+            </div>
+            <input id="new-device-notes" placeholder="Anything the reviewer should know (optional)">
+            <button class="btn-sell" style="margin-top:0.6rem;" onclick="submitDevice()">
+              Submit for review →
+            </button>
+            <div id="device-result" class="device-result"></div>
+          </div>
+        </div>`;
 
       document.getElementById('main-content').innerHTML = html;
       renderReadings();
       renderCredits();
+      loadDeviceRequests();
     }
 
     function statusTile(label, value) {
@@ -446,6 +476,67 @@
         key === 'credits' ? renderCredits() : renderReadings();
       } catch (e) {
         console.error(`Could not load ${key} page ${next}:`, e);
+      }
+    }
+
+    // ── Device onboarding ──
+
+    async function loadDeviceRequests() {
+      const container = document.getElementById('device-requests');
+      if (!container) return;
+
+      try {
+        const { requests } = await CTN.get('/api/installer/device-requests');
+        // Approved requests already appear above as active devices.
+        const outstanding = requests.filter(r => r.status !== 'approved');
+        if (!outstanding.length) { container.innerHTML = ''; return; }
+
+        container.innerHTML = outstanding.map(r => `
+          <div class="device-item">
+            <div>
+              <div class="device-id">${esc(r.device_id)}</div>
+              <div class="device-meta">
+                ${esc(r.location || '')}
+                ${r.review_note ? ` · ${esc(r.review_note)}` : ''}
+              </div>
+            </div>
+            <span class="badge badge-${r.status === 'pending' ? 'pending' : 'retired'}">
+              ${r.status === 'pending' ? 'Awaiting review' : 'Declined'}
+            </span>
+          </div>`).join('');
+      } catch (e) {
+        container.innerHTML = '';
+      }
+    }
+
+    async function submitDevice() {
+      const idField = document.getElementById('new-device-id');
+      const result = document.getElementById('device-result');
+
+      const device_id = idField.value.trim();
+      if (!device_id) {
+        result.textContent = 'Enter the device ID printed on your inverter or meter.';
+        result.className = 'device-result err';
+        return;
+      }
+
+      result.textContent = 'Submitting…';
+      result.className = 'device-result';
+
+      try {
+        const response = await CTN.post('/api/installer/device-requests', {
+          device_id,
+          location: document.getElementById('new-device-location').value.trim() || 'India',
+          notes: document.getElementById('new-device-notes').value.trim(),
+        });
+        result.textContent = response.message;
+        result.className = 'device-result ok';
+        idField.value = '';
+        document.getElementById('new-device-notes').value = '';
+        await loadDeviceRequests();
+      } catch (e) {
+        result.textContent = e.message;
+        result.className = 'device-result err';
       }
     }
 

@@ -84,6 +84,7 @@
     .notice-strip.visible { display: block; }
     .notice-strip.warn { background: var(--amber-light); color: var(--amber); }
     .cols-7 { grid-template-columns: 0.7fr 1.4fr 1.4fr 0.9fr 0.9fr 0.9fr 1.1fr; }
+    .cols-req { grid-template-columns: 1.2fr 1.6fr 1.1fr 1.4fr 1.3fr; }
     .cols-dev { grid-template-columns: 1.3fr 1.6fr 1.3fr 0.8fr 0.8fr 0.8fr; }
     .cols-txn { grid-template-columns: 0.6fr 1.6fr 0.8fr 1fr 1.4fr; }
     .link { color: var(--blue); text-decoration: none; }
@@ -185,6 +186,14 @@
 
       <div class="card">
         <div class="card-header">
+          <div class="card-title">Pending device requests</div>
+          <div class="page-info" id="requests-count"></div>
+        </div>
+        <div id="requests-list"><div class="empty-note">Loading...</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
           <div class="card-title">Registered devices</div>
           <div class="page-info" id="devices-count"></div>
         </div>
@@ -260,7 +269,7 @@
       overview: loadOverview,
       installers: loadInstallers,
       credits: () => loadCredits(1),
-      devices: loadDevices,
+      devices: () => { loadDeviceRequests(); loadDevices(); },
       transactions: () => loadTransactions(1),
       audit: () => loadAudit(1),
       health: loadHealth,
@@ -491,6 +500,61 @@
       const el = document.getElementById(elementId);
       el.textContent = message;
       el.className = 'form-result ' + (ok ? 'ok' : 'err');
+    }
+
+    async function loadDeviceRequests() {
+      const list = document.getElementById('requests-list');
+      try {
+        const data = await CTN.get('/api/admin/device-requests?status_filter=pending');
+        document.getElementById('requests-count').textContent =
+          data.pending_count ? `${data.pending_count} awaiting review` : 'none awaiting review';
+
+        list.innerHTML = data.requests.length ? `
+          <div class="table-row cols-req header">
+            <div>Device ID</div><div>Requested by</div><div>Location</div>
+            <div>Notes</div><div>Actions</div>
+          </div>
+          ${data.requests.map(r => `
+            <div class="table-row cols-req">
+              <div style="font-family:var(--mono);">${esc(r.device_id)}</div>
+              <div>${esc(r.requester_email || '—')}</div>
+              <div>${esc(r.location || '—')}</div>
+              <div style="color:var(--text2);font-size:10px;">${esc(r.notes || '—')}</div>
+              <div style="display:flex;gap:6px;">
+                <button class="btn-sm" onclick="reviewRequest(${r.id}, 'approve', '${esc(r.device_id)}')">Approve</button>
+                <button class="btn-sm" onclick="reviewRequest(${r.id}, 'reject', '${esc(r.device_id)}')">Reject</button>
+              </div>
+            </div>`).join('')}`
+          : '<div class="empty-note">No device requests awaiting review.</div>';
+      } catch (e) {
+        list.innerHTML = `<div class="empty-note">${esc(e.message)}</div>`;
+      }
+    }
+
+    async function reviewRequest(requestId, decision, deviceId) {
+      const approving = decision === 'approve';
+
+      // A rejection has to explain itself; the installer sees this note.
+      const note = prompt(
+        approving
+          ? `Note for approving ${deviceId} (recorded in the audit log):`
+          : `Why is ${deviceId} being rejected? The installer will see this.`,
+        approving ? 'Device verified' : '');
+      if (note === null) return;
+
+      if (!approving && note.trim().length < 5) {
+        alert('A reason of at least 5 characters is required to reject a device.');
+        return;
+      }
+
+      try {
+        const result = await CTN.post(
+          `/api/admin/device-requests/${requestId}/${decision}`, { note });
+        alert(result.message);
+        await Promise.all([loadDeviceRequests(), loadDevices(), loadOverview()]);
+      } catch (e) {
+        alert(e.message);
+      }
     }
 
     async function loadDevices() {

@@ -91,6 +91,12 @@ be — the role is rejected at validation.
 
 ## How a credit is made
 
+0. **Onboard.** An installer submits a device from their dashboard; it stays
+   inactive until an administrator approves it. Approval is deliberate rather
+   than automatic — a credit is only as trustworthy as the attestation of the
+   device behind it, so self-registration would amount to self-issuing credits.
+   Both approvals and rejections are audit-logged, and a rejection carries a
+   reason the installer can see.
 1. **Ingest.** Readings arrive from the seed dataset or an admin CSV upload.
    Each is hashed into a signature and stored under a fingerprint derived from
    its device and timestamp, so re-ingesting the same data is a no-op.
@@ -125,8 +131,8 @@ labelled as such throughout. Installers can browse but the buy action is
 disabled for them.
 
 **Admin.** Sign in as the admin. *Credits* is the ledger, with mint and retire
-actions and links to Polygonscan. *Devices & data* registers devices and ingests
-reading CSVs (`device_id, timestamp, delta_kwh`) — an invalid row rejects the
+actions and links to Polygonscan. *Devices & data* holds the pending device
+queue, the registered-device list, and ingests reading CSVs (`device_id, timestamp, delta_kwh`) — an invalid row rejects the
 whole file rather than importing part of it. *Transactions*, *Audit log*, and
 *Health* show marketplace activity, every admin action with its stated reason,
 and RPC/contract/wallet status.
@@ -142,9 +148,9 @@ front instead of failing at the point of use.
 cd backend && ../.venv/bin/python -m pytest
 ```
 
-76 tests covering authentication and role enforcement, wallet-signature
-verification, credit issuance and idempotency, marketplace concurrency, CSV
-validation, and the audit trail. They run against a temporary database and need
+96 tests covering authentication and role enforcement, wallet-signature
+verification, credit issuance and idempotency, marketplace concurrency, device
+onboarding and approval, CSV validation, and the audit trail. They run against a temporary database and need
 no network access.
 
 Several are regression tests for specific defects, including two buyers

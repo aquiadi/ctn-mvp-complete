@@ -7,6 +7,7 @@ a timestamp, and a stated reason.
 
 import csv
 import io
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -25,6 +26,17 @@ CSV_MAX_REPORTED_ERRORS = 20
 
 
 # ── Request models ─────────────────────────────────────────────────────────
+
+class DeviceReview(BaseModel):
+    """An administrator's decision on a submitted device."""
+
+    note: str = Field(default="", max_length=500)
+
+    @field_validator("note")
+    @classmethod
+    def strip(cls, value: str) -> str:
+        return value.strip()
+
 
 class DeviceRegistration(BaseModel):
     device_id: str = Field(..., min_length=1, max_length=64)
@@ -287,6 +299,149 @@ async def register_device(req: DeviceRegistration, admin: dict = Depends(require
         "device_id": req.device_id,
         "owner_email": req.owner_email,
         "location": req.location,
+    }
+
+
+# ── Device requests ────────────────────────────────────────────────────────
+
+@router.get("/device-requests")
+async def list_device_requests(
+    status_filter: Optional[str] = None, admin: dict = Depends(require_admin)
+):
+    """Devices submitted by installers, newest first, pending ones first."""
+    if status_filter and status_filter not in ("pending", "approved", "rejected"):
+        raise HTTPException(400, "status_filter must be pending, approved, or rejected")
+
+    where = "WHERE dr.status = :status" if status_filter else ""
+    values = {"status": status_filter} if status_filter else {}
+
+    requests = await database.fetch_all(
+        query=f"""SELECT dr.*, u.email AS requester_email, r.email AS reviewer_email
+                  FROM device_requests dr
+                  LEFT JOIN users u ON dr.requested_by = u.id
+                  LEFT JOIN users r ON dr.reviewed_by = r.id
+                  {where}
+                  ORDER BY dr.status = 'pending' DESC, dr.created_at DESC""",
+        values=values,
+    )
+    pending = await database.fetch_one(
+        "SELECT COUNT(*) AS cnt FROM device_requests WHERE status = 'pending'"
+    )
+
+    return {
+        "requests": [dict(r) for r in requests],
+        "pending_count": pending["cnt"] if pending else 0,
+    }
+
+
+async def _load_pending_request(request_id: int) -> dict:
+    row = await database.fetch_one(
+        query="""SELECT dr.*, u.email AS requester_email
+                 FROM device_requests dr
+                 LEFT JOIN users u ON dr.requested_by = u.id
+                 WHERE dr.id = :id""",
+        values={"id": request_id},
+    )
+    if not row:
+        raise HTTPException(404, f"Device request #{request_id} not found")
+
+    record = dict(row)
+    if record["status"] != "pending":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Request #{request_id} was already {record['status']}.",
+        )
+    return record
+
+
+@router.post("/device-requests/{request_id}/approve")
+async def approve_device_request(
+    request_id: int, req: DeviceReview, admin: dict = Depends(require_admin)
+):
+    """Approve a submission and register the device to the installer who asked."""
+    record = await _load_pending_request(request_id)
+
+    taken = await database.fetch_one(
+        "SELECT id FROM devices WHERE device_id = :device_id",
+        {"device_id": record["device_id"]},
+    )
+    if taken:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Device '{record['device_id']}' was registered by another route in the meantime.",
+        )
+
+    async with database.transaction():
+        await database.execute(
+            query="""INSERT INTO devices (device_id, owner_user_id, location)
+                     VALUES (:device_id, :owner_id, :location)""",
+            values={
+                "device_id": record["device_id"],
+                "owner_id": record["requested_by"],
+                "location": record["location"] or "India",
+            },
+        )
+        await database.execute(
+            query="""UPDATE device_requests
+                     SET status = 'approved', reviewed_by = :admin_id,
+                         reviewed_at = :now, review_note = :note
+                     WHERE id = :id""",
+            values={
+                "admin_id": admin["id"],
+                "now": time.time(),
+                "note": req.note or None,
+                "id": request_id,
+            },
+        )
+
+    await log_admin_action(
+        admin["id"], "approve_device_request", "device", record["device_id"],
+        req.note or "Device approved",
+        f"requested by {record['requester_email']}",
+    )
+
+    return {
+        "status": "approved",
+        "device_id": record["device_id"],
+        "owner_email": record["requester_email"],
+        "message": f"Device {record['device_id']} is now registered and can receive readings.",
+    }
+
+
+@router.post("/device-requests/{request_id}/reject")
+async def reject_device_request(
+    request_id: int, req: DeviceReview, admin: dict = Depends(require_admin)
+):
+    """Decline a submission. A reason is required so the installer can respond."""
+    if len(req.note) < 5:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "A reason of at least 5 characters is required when rejecting a device.",
+        )
+
+    record = await _load_pending_request(request_id)
+
+    await db_execute_with_retry(
+        query="""UPDATE device_requests
+                 SET status = 'rejected', reviewed_by = :admin_id,
+                     reviewed_at = :now, review_note = :note
+                 WHERE id = :id""",
+        values={
+            "admin_id": admin["id"],
+            "now": time.time(),
+            "note": req.note,
+            "id": request_id,
+        },
+    )
+    await log_admin_action(
+        admin["id"], "reject_device_request", "device", record["device_id"], req.note,
+        f"requested by {record['requester_email']}",
+    )
+
+    return {
+        "status": "rejected",
+        "device_id": record["device_id"],
+        "message": f"Request for {record['device_id']} was declined.",
     }
 
 
