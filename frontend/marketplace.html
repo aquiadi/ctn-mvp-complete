@@ -144,9 +144,24 @@
     let reservedIds = [];
     let purchaseStep = 'select'; // 'select' → 'confirm' → 'done'
 
+    // ── Auth-aware fetch wrapper ──
+    function authFetch(url, options = {}) {
+      const token = localStorage.getItem('ctn_token');
+      if (token) {
+        options.headers = options.headers || {};
+        if (typeof options.headers.set === 'function') {
+          options.headers.set('Authorization', 'Bearer ' + token);
+        } else {
+          options.headers['Authorization'] = 'Bearer ' + token;
+        }
+      }
+      options.credentials = 'include';
+      return fetch(url, options);
+    }
+
     async function checkAuth() {
       try {
-        const r = await fetch(API + '/api/auth/me', { credentials: 'include' });
+        const r = await authFetch(API + '/api/auth/me');
         if (!r.ok) throw new Error();
         const d = await r.json();
         if (d.user.role !== 'buyer') {
@@ -161,7 +176,8 @@
     }
 
     async function logout() {
-      await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'include' });
+      await authFetch(API + '/api/auth/logout', { method: 'POST' });
+      localStorage.removeItem('ctn_token');
       window.location.href = '/login';
     }
 
@@ -175,8 +191,7 @@
 
     async function loadListings() {
       try {
-        const data = await fetch(API + '/api/marketplace/listings', { 
-          credentials: 'include',
+        const data = await authFetch(API + '/api/marketplace/listings', { 
           headers: {
             'Cache-Control': 'no-cache, no-store, must-revalidate',
             'Pragma': 'no-cache'
@@ -275,8 +290,8 @@
       document.getElementById('purchase-modal').classList.remove('visible');
       // If we reserved but didn't complete, cancel the reservation
       if (reservedIds.length > 0 && purchaseStep !== 'done') {
-        fetch(API + '/api/marketplace/cancel-reservation', {
-          method: 'POST', credentials: 'include',
+        authFetch(API + '/api/marketplace/cancel-reservation', {
+          method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ credit_ids: reservedIds })
         }).catch(() => {});
@@ -292,8 +307,8 @@
         // Step 1: Reserve
         btn.disabled = true; btn.textContent = 'Reserving...';
         try {
-          const r = await fetch(API + '/api/marketplace/reserve', {
-            method: 'POST', credentials: 'include',
+          const r = await authFetch(API + '/api/marketplace/reserve', {
+            method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ credit_ids: selectedCredits })
           });
@@ -319,8 +334,8 @@
         // Step 2: Purchase
         btn.disabled = true; btn.textContent = 'Processing...';
         try {
-          const r = await fetch(API + '/api/marketplace/purchase', {
-            method: 'POST', credentials: 'include',
+          const r = await authFetch(API + '/api/marketplace/purchase', {
+            method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ reservation_ids: reservedIds })
           });
@@ -357,7 +372,7 @@
 
     async function showPurchases() {
       try {
-        const data = await fetch(API + '/api/marketplace/my-purchases', { credentials: 'include' }).then(r => r.json());
+        const data = await authFetch(API + '/api/marketplace/my-purchases').then(r => r.json());
         const container = document.getElementById('listings-container');
         if (!data.purchases || data.purchases.length === 0) {
           container.innerHTML = '<div class="empty-state"><div class="empty-title">No purchases yet</div><div class="empty-desc">Browse credits and make your first purchase.</div></div>';

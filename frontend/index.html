@@ -1059,6 +1059,21 @@
     const API_BASE = 'https://ctn-api-railway-production.up.railway.app';
     // ═══════════════════════════════════════════════
 
+    // ── Auth-aware fetch wrapper ──
+    function authFetch(url, options = {}) {
+      const token = localStorage.getItem('ctn_token');
+      if (token) {
+        options.headers = options.headers || {};
+        if (typeof options.headers.set === 'function') {
+          options.headers.set('Authorization', 'Bearer ' + token);
+        } else {
+          options.headers['Authorization'] = 'Bearer ' + token;
+        }
+      }
+      options.credentials = 'include';
+      return fetch(url, options);
+    }
+
     async function api(path, options = {}) {
       const r = await fetch(API_BASE + path, options);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -1069,12 +1084,13 @@
     if (new URLSearchParams(window.location.search).has('logged_out')) {
       (async function() {
         try {
-          const r = await fetch(API_BASE + '/api/auth/me', { credentials: 'include' });
+          const r = await authFetch(API_BASE + '/api/auth/me');
           if (r.ok) {
             // Session still valid? Force logout again
-            await fetch(API_BASE + '/api/auth/logout', { method: 'POST', credentials: 'include' });
+            await authFetch(API_BASE + '/api/auth/logout', { method: 'POST' });
           }
         } catch (e) {}
+        localStorage.removeItem('ctn_token');
         // Clean URL
         window.history.replaceState({}, '', '/');
       })();

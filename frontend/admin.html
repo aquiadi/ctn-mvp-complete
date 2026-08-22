@@ -173,9 +173,24 @@
     const API = 'https://ctn-api-railway-production.up.railway.app';
     let creditsPage = 1, auditPage = 1;
 
+    // ── Auth-aware fetch wrapper ──
+    function authFetch(url, options = {}) {
+      const token = localStorage.getItem('ctn_token');
+      if (token) {
+        options.headers = options.headers || {};
+        if (typeof options.headers.set === 'function') {
+          options.headers.set('Authorization', 'Bearer ' + token);
+        } else {
+          options.headers['Authorization'] = 'Bearer ' + token;
+        }
+      }
+      options.credentials = 'include';
+      return fetch(url, options);
+    }
+
     async function checkAuth() {
       try {
-        const r = await fetch(API + '/api/auth/me', { credentials: 'include' });
+        const r = await authFetch(API + '/api/auth/me');
         if (!r.ok) throw new Error();
         const d = await r.json();
         if (d.user.role !== 'admin') { window.location.href = '/login'; return null; }
@@ -184,7 +199,8 @@
     }
 
     async function logout() {
-      await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'include' });
+      await authFetch(API + '/api/auth/logout', { method: 'POST' });
+      localStorage.removeItem('ctn_token');
       window.location.href = '/login';
     }
 
@@ -214,8 +230,8 @@
     async function loadOverview() {
       try {
         const [ov, audit] = await Promise.all([
-          fetch(API + '/api/admin/overview', { credentials: 'include' }).then(r => r.json()),
-          fetch(API + '/api/admin/audit-log?limit=5', { credentials: 'include' }).then(r => r.json())
+          authFetch(API + '/api/admin/overview').then(r => r.json()),
+          authFetch(API + '/api/admin/audit-log?limit=5').then(r => r.json())
         ]);
         const u = ov.users, c = ov.credits, t = ov.transactions;
         document.getElementById('overview-stats').innerHTML = `
@@ -245,7 +261,7 @@
 
     async function loadInstallers() {
       try {
-        const data = await fetch(API + '/api/admin/installers', { credentials: 'include' }).then(r => r.json());
+        const data = await authFetch(API + '/api/admin/installers').then(r => r.json());
         const list = document.getElementById('installers-list');
         if (!data.installers || data.installers.length === 0) {
           list.innerHTML = '<div class="empty-note">No installer accounts yet.</div>';
@@ -269,7 +285,7 @@
       if (page < 1) return;
       creditsPage = page;
       try {
-        const data = await fetch(API + `/api/admin/credits?page=${page}&limit=30`, { credentials: 'include' }).then(r => r.json());
+        const data = await authFetch(API + `/api/admin/credits?page=${page}&limit=30`).then(r => r.json());
         const list = document.getElementById('credits-list');
         if (!data.credits || data.credits.length === 0) {
           list.innerHTML = '<div class="empty-note">No credits found.</div>';
@@ -317,9 +333,8 @@
 
       try {
         // Change from /api/admin/mint (which only logged) to /mint which actually hits the blockchain
-        const res = await fetch(API + `/mint/${creditId}?recipient=${encodeURIComponent(recipient.trim())}`, {
-          method: 'POST',
-          credentials: 'include'
+        const res = await authFetch(API + `/mint/${creditId}?recipient=${encodeURIComponent(recipient.trim())}`, {
+          method: 'POST'
         });
         
         if (!res.ok) {
@@ -340,7 +355,7 @@
       if (page < 1) return;
       auditPage = page;
       try {
-        const data = await fetch(API + `/api/admin/audit-log?page=${page}&limit=20`, { credentials: 'include' }).then(r => r.json());
+        const data = await authFetch(API + `/api/admin/audit-log?page=${page}&limit=20`).then(r => r.json());
         const list = document.getElementById('audit-list');
         if (!data.logs || data.logs.length === 0) {
           list.innerHTML = '<div class="empty-note">No audit entries yet.</div>';
@@ -365,7 +380,7 @@
 
     async function loadHealth() {
       try {
-        const data = await fetch(API + '/api/admin/system-health', { credentials: 'include' }).then(r => r.json());
+        const data = await authFetch(API + '/api/admin/system-health').then(r => r.json());
         const entries = Object.entries(data).filter(([k]) => k !== 'error');
         document.getElementById('health-list').innerHTML = entries.map(([k, v]) => {
           let display = v;

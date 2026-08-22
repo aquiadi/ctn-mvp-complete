@@ -208,6 +208,21 @@
     const API_BASE = 'https://ctn-api-railway-production.up.railway.app';
     let selectedRole = 'installer';
 
+    // ── Auth-aware fetch wrapper ──
+    function authFetch(url, options = {}) {
+      const token = localStorage.getItem('ctn_token');
+      if (token) {
+        options.headers = options.headers || {};
+        if (typeof options.headers.set === 'function') {
+          options.headers.set('Authorization', 'Bearer ' + token);
+        } else {
+          options.headers['Authorization'] = 'Bearer ' + token;
+        }
+      }
+      options.credentials = 'include';
+      return fetch(url, options);
+    }
+
     // Pre-fill role from query param
     const params = new URLSearchParams(window.location.search);
     if (params.get('role') === 'buyer') {
@@ -220,7 +235,7 @@
     // Check if already logged in
     (async function checkAuth() {
       try {
-        const r = await fetch(API_BASE + '/api/auth/me', { credentials: 'include' });
+        const r = await authFetch(API_BASE + '/api/auth/me');
         if (r.ok) {
           const data = await r.json();
           redirectForRole(data.user.role);
@@ -274,8 +289,8 @@
       const btn = document.getElementById('login-btn');
       btn.disabled = true; btn.textContent = 'Signing in...';
       try {
-        const r = await fetch(API_BASE + '/api/auth/login', {
-          method: 'POST', credentials: 'include',
+        const r = await authFetch(API_BASE + '/api/auth/login', {
+          method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             email: document.getElementById('login-email').value,
@@ -284,6 +299,8 @@
         });
         const data = await r.json();
         if (!r.ok) { showError(data.detail || 'Login failed'); return; }
+        // Store token for cross-origin auth
+        if (data.token) localStorage.setItem('ctn_token', data.token);
         redirectForRole(data.user.role);
       } catch(e) {
         showError('Network error — please try again.');
@@ -297,8 +314,8 @@
       const btn = document.getElementById('signup-btn');
       btn.disabled = true; btn.textContent = 'Creating account...';
       try {
-        const r = await fetch(API_BASE + '/api/auth/signup', {
-          method: 'POST', credentials: 'include',
+        const r = await authFetch(API_BASE + '/api/auth/signup', {
+          method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             email: document.getElementById('signup-email').value,
@@ -316,6 +333,8 @@
           }
           return;
         }
+        // Store token for cross-origin auth
+        if (data.token) localStorage.setItem('ctn_token', data.token);
         redirectForRole(data.user.role);
       } catch(e) {
         showError('Network error — please try again.');

@@ -76,14 +76,21 @@ def clear_auth_cookie(response: Response):
 
 async def get_current_user(request: Request) -> dict:
     """
-    Extract and validate the JWT from the ctn_session httpOnly cookie.
+    Extract and validate the JWT from the ctn_session httpOnly cookie,
+    or from the Authorization: Bearer <token> header as a fallback.
     Returns the user record from the database.
     """
     token = request.cookies.get(COOKIE_NAME)
     if not token:
+        # Fallback: check Authorization header (for cross-origin deployments
+        # where third-party cookies are blocked by the browser)
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated — no session cookie found"
+            detail="Not authenticated — no session cookie or token found"
         )
 
     try:

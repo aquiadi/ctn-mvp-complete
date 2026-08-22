@@ -107,6 +107,7 @@ async def signup(req: SignupRequest, response: Response):
 
     return {
         "status": "created",
+        "token": token,
         "user": {
             "id": user_id,
             "email": req.email,
@@ -144,6 +145,7 @@ async def login(req: LoginRequest, response: Response):
 
     return {
         "status": "authenticated",
+        "token": token,
         "user": {
             "id": user["id"],
             "email": user["email"],

@@ -199,10 +199,25 @@
     let currentReadingsPage = 1;
     const PAGE_SIZE = 10;
 
+    // ── Auth-aware fetch wrapper ──
+    function authFetch(url, options = {}) {
+      const token = localStorage.getItem('ctn_token');
+      if (token) {
+        options.headers = options.headers || {};
+        if (typeof options.headers.set === 'function') {
+          options.headers.set('Authorization', 'Bearer ' + token);
+        } else {
+          options.headers['Authorization'] = 'Bearer ' + token;
+        }
+      }
+      options.credentials = 'include';
+      return fetch(url, options);
+    }
+
     // ── Auth check ──
     async function checkAuth() {
       try {
-        const r = await fetch(API + '/api/auth/me', { credentials: 'include' });
+        const r = await authFetch(API + '/api/auth/me');
         if (!r.ok) throw new Error('Not auth');
         const data = await r.json();
         if (data.user.role !== 'installer') {
@@ -218,10 +233,11 @@
 
     async function logout() {
       try {
-        await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'include' });
+        await authFetch(API + '/api/auth/logout', { method: 'POST' });
       } catch (e) {
         console.warn('Logout API call failed:', e);
       }
+      localStorage.removeItem('ctn_token');
       // Force hard navigation to clear any client-side state
       window.location.href = '/?logged_out=1';
     }
@@ -235,9 +251,9 @@
 
       try {
         const [dash, creds, reads] = await Promise.all([
-          fetch(API + '/api/installer/dashboard', { credentials: 'include' }).then(r => r.json()),
-          fetch(API + '/api/installer/credits?page=1&limit=' + PAGE_SIZE, { credentials: 'include' }).then(r => r.json()),
-          fetch(API + '/api/installer/readings?page=1&limit=' + PAGE_SIZE, { credentials: 'include' }).then(r => r.json())
+          authFetch(API + '/api/installer/dashboard').then(r => r.json()),
+          authFetch(API + '/api/installer/credits?page=1&limit=' + PAGE_SIZE).then(r => r.json()),
+          authFetch(API + '/api/installer/readings?page=1&limit=' + PAGE_SIZE).then(r => r.json())
         ]);
         dashboardData = dash;
         creditsData = creds;
@@ -476,7 +492,7 @@
       if (newPage < 1 || newPage > pages) return;
       currentReadingsPage = newPage;
       try {
-        const r = await fetch(API + `/api/installer/readings?page=${currentReadingsPage}&limit=${PAGE_SIZE}`, { credentials: 'include' });
+        const r = await authFetch(API + `/api/installer/readings?page=${currentReadingsPage}&limit=${PAGE_SIZE}`);
         readingsData = await r.json();
         renderReadings(readingsData);
       } catch(e) { console.error(e); }
@@ -488,7 +504,7 @@
       if (newPage < 1 || newPage > pages) return;
       currentCreditsPage = newPage;
       try {
-        const r = await fetch(API + `/api/installer/credits?page=${currentCreditsPage}&limit=${PAGE_SIZE}`, { credentials: 'include' });
+        const r = await authFetch(API + `/api/installer/credits?page=${currentCreditsPage}&limit=${PAGE_SIZE}`);
         creditsData = await r.json();
         renderCredits(creditsData);
       } catch(e) { console.error(e); }
@@ -548,7 +564,7 @@
 
       try {
         // Fetch all verified credit IDs
-        const r = await fetch(API + '/api/installer/credits?page=1&limit=10000&status_filter=verified', { credentials: 'include' });
+        const r = await authFetch(API + '/api/installer/credits?page=1&limit=10000&status_filter=verified');
         const data = await r.json();
         const ids = data.credits.map(c => c.id);
 
@@ -569,8 +585,8 @@
 
         const selectedIds = ids.slice(0, quantity);
 
-        const sellR = await fetch(API + '/api/installer/sell', {
-          method: 'POST', credentials: 'include',
+        const sellR = await authFetch(API + '/api/installer/sell', {
+          method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ credit_ids: selectedIds })
         });
