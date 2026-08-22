@@ -10,6 +10,8 @@ so re-ingesting the same data is a no-op.
 import asyncio
 import hashlib
 import json
+import os
+from pathlib import Path
 from typing import Iterable, Optional
 
 import aiosqlite
@@ -19,7 +21,52 @@ from passlib.context import CryptContext
 import config
 
 DATABASE_URL = config.DATABASE_URL
+
+# `sqlite:///relative.db` and `sqlite:////absolute/path.db` both reduce to the
+# filesystem path by dropping the scheme and its three slashes; an absolute URL
+# keeps its leading slash because it carries a fourth.
 DB_PATH = DATABASE_URL.replace("sqlite:///", "")
+
+
+def _prepare_database_directory() -> Path:
+    """
+    Ensure the database's parent directory exists and report where data lives.
+
+    On a container host the working directory is ephemeral: unless the path
+    points at a mounted volume, every deploy starts from an empty file and all
+    accounts, listings, and purchases are lost. Logging the resolved path makes
+    that visible instead of silently surprising.
+    """
+    resolved = Path(DB_PATH).expanduser().resolve()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+
+    existed = resolved.exists()
+    print(f"• Database: {resolved} ({'existing' if existed else 'new'})")
+
+    if config.IS_PRODUCTION and not _looks_persistent(resolved):
+        print(
+            "⚠ The database is not on a mounted volume — this deployment will "
+            "lose all data on the next restart. Set DATABASE_URL to a path "
+            "inside a persistent volume."
+        )
+
+    return resolved
+
+
+def _looks_persistent(path: Path) -> bool:
+    """
+    Whether the database path is plausibly on a mounted volume.
+
+    Hosts expose volumes at a dedicated mount point rather than inside the
+    application directory, so a path under the working directory is treated as
+    ephemeral. `PERSISTENT_DATA_DIR` names the mount when it is known.
+    """
+    mount = os.getenv("PERSISTENT_DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+    if mount:
+        return str(path).startswith(str(Path(mount).resolve()))
+
+    return not str(path).startswith(str(Path.cwd().resolve()))
+
 
 database = Database(DATABASE_URL)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -501,6 +548,8 @@ async def sync_readings_from_ipfs(owner_user_id: int):
 
 async def init_db():
     """Connect, bring the schema up to date, and seed baseline accounts."""
+    _prepare_database_directory()
+
     await database.connect()
     await _apply_schema()
 

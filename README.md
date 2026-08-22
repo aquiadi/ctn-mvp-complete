@@ -178,6 +178,23 @@ Both auto-deploy on push to `master`. The frontend calls the Railway API and
 falls back to a bearer token when the cross-origin session cookie is blocked, so
 no per-environment frontend build is required.
 
+### Persistent storage
+
+The API stores data in SQLite. A container filesystem is ephemeral, so unless
+the database sits on a mounted volume every deploy restarts from an empty file
+and all accounts, listings, and purchases are lost.
+
+On Railway: open the service, **Variables → + New Volume**, mount it at `/data`,
+then set `DATABASE_URL=sqlite:////data/ctn.db` (four slashes — three for the
+scheme, one for the absolute path). The directory is created on first boot, and
+in production the server warns at startup if the database is not on a volume.
+
+This keeps a single instance durable, which is what SQLite supports. Serving
+from more than one instance needs a networked database such as Postgres; the
+`databases` layer already speaks it, and the SQLite-specific parts are the raw
+DDL in `_apply_schema`, the `PRAGMA table_info` migration check, and
+`GROUP_CONCAT` in the marketplace listing query.
+
 **Required production environment variables** (set on the API host). With
 `ENVIRONMENT=production` the process validates these at startup and refuses to
 boot if any is unsafe, so a misconfiguration fails loudly rather than silently:
@@ -189,6 +206,7 @@ boot if any is unsafe, so a misconfiguration fails loudly rather than silently:
 | `ADMIN_PASSWORD` | Must differ from the documented demo password |
 | `COOKIE_SECURE=true` | Sends the session cookie only over HTTPS |
 | `CORS_ORIGINS` | Exact frontend origin(s), e.g. the Vercel URL |
+| `DATABASE_URL` | Path inside the mounted volume, or data is lost on redeploy |
 | `PRIVATE_KEY` | Optional — enables minting and retirement |
 | `PINATA_API_KEY` / `PINATA_SECRET` | Optional — enables real IPFS pinning |
 
