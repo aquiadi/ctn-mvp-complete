@@ -291,3 +291,96 @@ async def test_verification_is_audited(app_client, admin_token, make_user):
     entry = next(e for e in logs if e["target_id"] == "NEW-AUDIT")
     assert entry["action"] == "verify_device"
     assert "invoice" in entry["reason"]
+
+
+# ── The spreadsheet path, for sellers without a sensor ─────────────────────
+
+def _csv(rows: str) -> dict:
+    return {"file": ("readings.csv", rows, "text/csv")}
+
+
+async def test_a_seller_can_add_a_meter_and_upload_readings(app_client, make_user):
+    """Someone with no ESP32 still needs a way in at this stage."""
+    token, _ = await make_user("installer")
+
+    added = await app_client.post(
+        "/api/installer/devices", headers=auth(token),
+        json={"device_id": "METER-01", "location": "Pune"})
+    assert added.status_code == 200, added.text
+    assert added.json()["attestation_enabled"] is False
+
+    response = await app_client.post(
+        "/api/installer/upload-readings", headers=auth(token),
+        files=_csv("device_id,timestamp,delta_kwh\n"
+                   "METER-01,2026-03-01 06:00:00,610\n"
+                   "METER-01,2026-03-01 06:15:00,610\n"))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["readings_added"] == 2
+    assert body["credits_issued"] == 1
+    assert body["attested"] is False
+
+
+async def test_uploaded_readings_are_not_attested(app_client, make_user):
+    """The weaker guarantee has to stay visible, not be quietly equated."""
+    token, _ = await make_user("installer")
+    await app_client.post("/api/installer/devices", headers=auth(token),
+                          json={"device_id": "METER-PLAIN", "location": "X"})
+    await app_client.post(
+        "/api/installer/upload-readings", headers=auth(token),
+        files=_csv("device_id,timestamp,delta_kwh\nMETER-PLAIN,2026-03-02 06:00:00,10\n"))
+
+    row = await database.database.fetch_one(
+        "SELECT device_signature FROM generation_readings WHERE device_id = 'METER-PLAIN'")
+    assert row["device_signature"] is None
+
+
+async def test_a_seller_cannot_upload_for_someone_elses_meter(app_client, make_user):
+    """Otherwise generation could be credited to the wrong account."""
+    owner_token, _ = await make_user("installer")
+    await app_client.post("/api/installer/devices", headers=auth(owner_token),
+                          json={"device_id": "METER-OWNED", "location": "X"})
+
+    intruder_token, _ = await make_user("installer")
+    await app_client.post("/api/installer/devices", headers=auth(intruder_token),
+                          json={"device_id": "METER-OTHER", "location": "X"})
+
+    response = await app_client.post(
+        "/api/installer/upload-readings", headers=auth(intruder_token),
+        files=_csv("device_id,timestamp,delta_kwh\nMETER-OWNED,2026-03-03 06:00:00,10\n"))
+    assert response.status_code == 400
+    assert "not one of your devices" in response.text
+
+
+async def test_uploading_without_a_meter_explains_what_to_do(app_client, make_user):
+    token, _ = await make_user("installer")
+    response = await app_client.post(
+        "/api/installer/upload-readings", headers=auth(token),
+        files=_csv("device_id,timestamp,delta_kwh\nX,2026-03-04 06:00:00,10\n"))
+    assert response.status_code == 400
+    assert "Add a device" in response.json()["detail"]
+
+
+async def test_a_duplicate_meter_name_is_refused(app_client, make_user):
+    token, _ = await make_user("installer")
+    body = {"device_id": "METER-DUP", "location": "X"}
+    assert (await app_client.post("/api/installer/devices",
+                                  headers=auth(token), json=body)).status_code == 200
+    assert (await app_client.post("/api/installer/devices",
+                                  headers=auth(token), json=body)).status_code == 409
+
+
+async def test_uploaded_credits_are_also_pending(app_client, make_user):
+    """An uploaded number is an assertion, so it is gated like a self-enrolled one."""
+    token, _ = await make_user("installer")
+    await app_client.post("/api/installer/devices", headers=auth(token),
+                          json={"device_id": "METER-PENDING", "location": "X"})
+    await app_client.post(
+        "/api/installer/upload-readings", headers=auth(token),
+        files=_csv("device_id,timestamp,delta_kwh\n"
+                   "METER-PENDING,2026-03-05 06:00:00,610\n"
+                   "METER-PENDING,2026-03-05 06:15:00,610\n"))
+
+    row = await database.database.fetch_one(
+        "SELECT status FROM credits WHERE device_id = 'METER-PENDING'")
+    assert row["status"] == "pending"

@@ -9,12 +9,13 @@ import secrets
 import time
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field, field_validator
 
 import config
 from auth import require_installer
-from database import database, db_execute_with_retry
+from data_utils import CsvError, parse_reading_csv
+from database import database, db_execute_with_retry, process_raw_readings
 
 router = APIRouter(prefix="/api/installer", tags=["installer"])
 
@@ -48,6 +49,27 @@ class DeviceRequestSubmission(BaseModel):
             return ""
         import attestation
         return attestation.normalise_public_key(value)
+
+    @field_validator("device_id")
+    @classmethod
+    def validate_device_id(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", value):
+            raise ValueError(
+                "Device ID may contain only letters, numbers, dots, dashes, and underscores."
+            )
+        return value
+
+
+class ManualDeviceRequest(BaseModel):
+    """A device whose readings will be uploaded rather than signed."""
+
+    device_id: str = Field(..., min_length=3, max_length=64)
+    location: str = Field(default="India", max_length=120)
+
+    @field_validator("device_id", "location")
+    @classmethod
+    def strip(cls, value: str) -> str:
+        return value.strip()
 
     @field_validator("device_id")
     @classmethod
@@ -365,6 +387,98 @@ async def list_enrollment_codes(user: dict = Depends(require_installer)):
             }
             for c in codes
         ]
+    }
+
+
+@router.post("/devices")
+async def add_manual_device(
+    req: ManualDeviceRequest, user: dict = Depends(require_installer)
+):
+    """
+    Register a meter whose readings will be uploaded rather than signed.
+
+    For hardware that cannot sign, and for loading history that predates a
+    sensor. No signing key is registered, so nothing it reports can be attested;
+    its credits stay unsellable until an operator confirms the installation,
+    exactly as for a self-enrolled device.
+    """
+    taken = await database.fetch_one(
+        "SELECT id FROM devices WHERE device_id = :device_id",
+        {"device_id": req.device_id},
+    )
+    if taken:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Device '{req.device_id}' is already registered.",
+        )
+
+    await db_execute_with_retry(
+        query="""INSERT INTO devices (device_id, owner_user_id, location, enrolled_via)
+                 VALUES (:device_id, :owner_id, :location, 'manual')""",
+        values={
+            "device_id": req.device_id,
+            "owner_id": user["id"],
+            "location": req.location or "India",
+        },
+    )
+
+    return {
+        "status": "added",
+        "device_id": req.device_id,
+        "attestation_enabled": False,
+        "message": (
+            f"{req.device_id} added. Upload readings for it as a CSV. "
+            "Readings will be recorded as imported rather than attested."
+        ),
+    }
+
+
+@router.post("/upload-readings")
+async def upload_readings(
+    file: UploadFile = File(...), user: dict = Depends(require_installer)
+):
+    """
+    Import readings for this seller's own devices from a CSV.
+
+    Only their devices are offered to the parser, so a row naming someone
+    else's meter is refused rather than silently crediting the wrong account.
+    """
+    devices = {
+        row["device_id"]: dict(row)
+        for row in await database.fetch_all(
+            query="""SELECT device_id, owner_user_id, location
+                     FROM devices WHERE owner_user_id = :user_id""",
+            values={"user_id": user["id"]},
+        )
+    }
+    if not devices:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Add a device before uploading readings for it.",
+        )
+
+    try:
+        readings = parse_reading_csv(
+            await file.read(), devices, config.EMISSION_FACTOR_KG_PER_KWH
+        )
+    except CsvError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=exc.as_detail() if exc.errors else exc.message,
+        )
+
+    inserted, issued = await process_raw_readings(readings, user["id"])
+
+    return {
+        "status": "imported",
+        "readings_added": inserted,
+        "rows_processed": len(readings),
+        "credits_issued": issued,
+        "attested": False,
+        "message": (
+            f"Imported {inserted} reading(s) and issued {issued} credit(s). "
+            "Uploaded readings are recorded as imported, not attested."
+        ),
     }
 
 

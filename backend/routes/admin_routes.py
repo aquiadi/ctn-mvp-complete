@@ -5,8 +5,6 @@ Every administrative action is recorded in `audit_log` with the acting admin,
 a timestamp, and a stated reason.
 """
 
-import csv
-import io
 import time
 from typing import Optional
 
@@ -16,14 +14,10 @@ from pydantic import BaseModel, Field, field_validator
 import chain
 import config
 from auth import require_admin
+from data_utils import CsvError, parse_reading_csv
 from database import database, db_execute_with_retry, process_raw_readings
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
-
-CSV_REQUIRED_COLUMNS = {"device_id", "timestamp", "delta_kwh"}
-CSV_MAX_BYTES = 5 * 1024 * 1024
-CSV_MAX_REPORTED_ERRORS = 20
-
 
 # ── Request models ─────────────────────────────────────────────────────────
 
@@ -547,28 +541,11 @@ async def verify_device(
 @router.post("/ingest-csv")
 async def ingest_csv(file: UploadFile = File(...), admin: dict = Depends(require_admin)):
     """
-    Ingest raw generation readings from a CSV of `device_id, timestamp, delta_kwh`.
+    Import raw readings from a CSV of `device_id, timestamp, delta_kwh`.
 
-    Rows are validated in full before anything is written, so a malformed file
-    is rejected rather than partially applied.
+    An operator can import for any registered device. Imported rows carry no
+    device signature, so they are recorded as unattested.
     """
-    content = await file.read()
-    if len(content) > CSV_MAX_BYTES:
-        raise HTTPException(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            f"CSV exceeds the {CSV_MAX_BYTES // (1024 * 1024)}MB limit.",
-        )
-
-    try:
-        decoded = content.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raise HTTPException(400, "CSV must be UTF-8 encoded.")
-
-    reader = csv.DictReader(io.StringIO(decoded))
-    missing = CSV_REQUIRED_COLUMNS - set(reader.fieldnames or [])
-    if missing:
-        raise HTTPException(400, f"CSV is missing required columns: {', '.join(sorted(missing))}")
-
     devices = {
         row["device_id"]: dict(row)
         for row in await database.fetch_all(
@@ -576,55 +553,12 @@ async def ingest_csv(file: UploadFile = File(...), admin: dict = Depends(require
         )
     }
 
-    readings, errors = [], []
-    for line_number, row in enumerate(reader, start=2):  # row 1 is the header
-        device_id = (row.get("device_id") or "").strip()
-        timestamp = (row.get("timestamp") or "").strip()
-        raw_kwh = (row.get("delta_kwh") or "").strip()
-
-        if not (device_id and timestamp and raw_kwh):
-            errors.append(f"Line {line_number}: missing a required value.")
-            continue
-        if device_id not in devices:
-            errors.append(f"Line {line_number}: unknown device '{device_id}' — register it first.")
-            continue
-
-        try:
-            delta_kwh = float(raw_kwh)
-        except ValueError:
-            errors.append(f"Line {line_number}: delta_kwh must be numeric, got '{raw_kwh}'.")
-            continue
-
-        if delta_kwh < 0:
-            errors.append(f"Line {line_number}: delta_kwh cannot be negative.")
-            continue
-
-        device = devices[device_id]
-        readings.append(
-            {
-                "device_id": device_id,
-                "timestamp": timestamp,
-                # For delta ingestion, total_kwh carries the interval's own
-                # generation rather than a running meter total.
-                "total_kwh": delta_kwh,
-                "co2_avoided_kg": delta_kwh * config.EMISSION_FACTOR_KG_PER_KWH,
-                "location": device["location"],
-                "owner_user_id": device["owner_user_id"],
-            }
+    try:
+        readings = parse_reading_csv(
+            await file.read(), devices, config.EMISSION_FACTOR_KG_PER_KWH
         )
-
-    if errors:
-        raise HTTPException(
-            400,
-            {
-                "message": f"CSV validation failed with {len(errors)} error(s). Nothing was imported.",
-                "errors": errors[:CSV_MAX_REPORTED_ERRORS],
-                "truncated": len(errors) > CSV_MAX_REPORTED_ERRORS,
-            },
-        )
-
-    if not readings:
-        raise HTTPException(400, "CSV contains no data rows.")
+    except CsvError as exc:
+        raise HTTPException(400, exc.as_detail() if exc.errors else exc.message)
 
     inserted, issued = await process_raw_readings(readings, readings[0]["owner_user_id"])
     await log_admin_action(

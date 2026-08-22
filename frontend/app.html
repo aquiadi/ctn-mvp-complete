@@ -153,6 +153,22 @@
     .device-add-row input { flex: 1 1 160px; }
     .device-add input { width: 100%; padding: 0.5rem 0.7rem; border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; background: var(--bg); color: var(--text); }
     .device-result { font-size: 11px; margin-top: 0.5rem; line-height: 1.5; }
+    .choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0.9rem 0; }
+    .choice { padding: 1rem 0.85rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: transparent; cursor: pointer; text-align: left; font-family: var(--mono); transition: all 0.15s; }
+    .choice:hover { border-color: var(--green-mid); }
+    .choice.selected { border-color: var(--green); background: var(--green-light); }
+    .choice-icon { font-size: 1.2rem; margin-bottom: 0.3rem; }
+    .choice-title { font-size: 12px; font-weight: 500; color: var(--text); }
+    .choice-desc { font-size: 10px; color: var(--text2); margin-top: 0.2rem; line-height: 1.4; }
+    .panel { margin-top: 0.5rem; }
+    .panel-lead { font-size: 12px; color: var(--text2); line-height: 1.6; margin-bottom: 0.8rem; }
+    .panel-hint { font-size: 11px; color: var(--text3); line-height: 1.6; margin: 0.4rem 0 0.6rem; }
+    .panel-hint code { background: var(--bg2); padding: 1px 5px; border-radius: 4px; }
+    .step { font-size: 11px; font-weight: 500; color: var(--text); margin-bottom: 0.45rem; display: flex; align-items: center; gap: 7px; }
+    .step-num { display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 50%; background: var(--green); color: #fff; font-size: 9px; }
+    .pairing-next { font-size: 12px; color: var(--text2); line-height: 1.6; margin: 0.8rem 0 0.5rem; }
+    .pairing-details { font-size: 11px; color: var(--text2); }
+    .pairing-details summary { cursor: pointer; color: var(--green); padding: 0.3rem 0; }
     .pairing-box { margin-top: 0.9rem; padding: 1rem; background: var(--green-light); border-radius: var(--radius-sm); }
     .pairing-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--green); }
     .pairing-code { font-family: var(--mono); font-size: 1.05rem; font-weight: 500; letter-spacing: 0.04em; margin: 0.4rem 0 0.8rem; user-select: all; word-break: break-all; }
@@ -399,23 +415,26 @@
           <div id="pairing-codes"></div>
 
           <div class="device-add">
-            <div class="device-add-title">Connect a sensor</div>
+            <div class="device-add-title">Start earning credits</div>
             <p class="device-add-help">
-              Generate a pairing code and flash it into your device along with your
-              WiFi details. On first boot it creates its own signing key — which
-              never leaves the device — enrols itself, and starts reporting.
-              Readings count immediately; selling unlocks once we have confirmed
-              the installation.
+              Every 1,000&nbsp;kg of CO₂ your panels avoid becomes one carbon credit
+              you can sell. Choose how your generation data reaches us.
             </p>
-            <div class="device-add-row">
-              <input id="new-device-label" placeholder="Name it (e.g. Rooftop array)">
-              <input id="new-device-location" placeholder="Location">
+
+            <div class="choice-grid">
+              <button class="choice" onclick="showConnectOption('sensor', this)">
+                <div class="choice-icon">📡</div>
+                <div class="choice-title">Connect a sensor</div>
+                <div class="choice-desc">Readings arrive automatically, signed by your device</div>
+              </button>
+              <button class="choice" onclick="showConnectOption('upload', this)">
+                <div class="choice-icon">📄</div>
+                <div class="choice-title">Upload a spreadsheet</div>
+                <div class="choice-desc">No sensor needed — send us your meter readings</div>
+              </button>
             </div>
-            <button class="btn-sell" style="margin-top:0.6rem;" onclick="generatePairingCode()">
-              Generate pairing code →
-            </button>
-            <div id="device-result" class="device-result"></div>
-            <div id="pairing-instructions"></div>
+
+            <div id="connect-panel"></div>
           </div>
         </div>`;
     }
@@ -535,6 +554,117 @@
       }
     }
 
+    function showConnectOption(option, button) {
+      document.querySelectorAll('.choice').forEach(c => c.classList.remove('selected'));
+      if (button) button.classList.add('selected');
+
+      const panel = document.getElementById('connect-panel');
+      panel.innerHTML = option === 'sensor' ? sensorPanel() : uploadPanel();
+    }
+
+    function sensorPanel() {
+      return `
+        <div class="panel">
+          <p class="panel-lead">
+            We will give you a code. Your installer enters it once when setting up
+            the device — after that it reports on its own, and you do nothing.
+          </p>
+          <div class="device-add-row">
+            <input id="new-device-label" placeholder="What are you naming it? (e.g. Rooftop)">
+            <input id="new-device-location" placeholder="Where is it? (e.g. Nashik)">
+          </div>
+          <button class="btn-sell" style="margin-top:0.6rem;" onclick="generatePairingCode()">
+            Get my code →
+          </button>
+          <div id="device-result" class="device-result"></div>
+          <div id="pairing-instructions"></div>
+        </div>`;
+    }
+
+    function uploadPanel() {
+      return `
+        <div class="panel">
+          <p class="panel-lead">
+            Send us the readings from your existing meter. Add the meter once,
+            then upload a spreadsheet whenever you have new data.
+          </p>
+
+          <div class="step"><span class="step-num">1</span> Add your meter</div>
+          <div class="device-add-row">
+            <input id="manual-device-id" placeholder="Meter name (e.g. METER-01)">
+            <input id="manual-device-location" placeholder="Where is it?">
+          </div>
+          <button class="btn-page" style="margin-top:0.5rem;" onclick="addManualDevice()">
+            Add meter
+          </button>
+          <div id="manual-device-result" class="device-result"></div>
+
+          <div class="step" style="margin-top:1rem;"><span class="step-num">2</span> Upload readings</div>
+          <p class="panel-hint">
+            A spreadsheet saved as CSV with three columns:
+            <code>device_id</code>, <code>timestamp</code>, <code>delta_kwh</code>
+            — the meter name, when it was read, and the units generated since the
+            last reading.
+          </p>
+          <div class="device-add-row">
+            <input type="file" id="readings-file" accept=".csv,text/csv">
+            <button class="btn-page" onclick="uploadReadings()">Upload</button>
+          </div>
+          <div id="upload-result" class="device-result"></div>
+        </div>`;
+    }
+
+    async function addManualDevice() {
+      const result = document.getElementById('manual-device-result');
+      const deviceId = document.getElementById('manual-device-id').value.trim();
+
+      if (!deviceId) {
+        result.textContent = 'Give your meter a name first.';
+        result.className = 'device-result err';
+        return;
+      }
+
+      try {
+        const response = await CTN.post('/api/installer/devices', {
+          device_id: deviceId,
+          location: document.getElementById('manual-device-location').value.trim() || 'India',
+        });
+        result.textContent = response.message;
+        result.className = 'device-result ok';
+      } catch (e) {
+        result.textContent = e.message;
+        result.className = 'device-result err';
+      }
+    }
+
+    async function uploadReadings() {
+      const input = document.getElementById('readings-file');
+      const result = document.getElementById('upload-result');
+
+      if (!input.files.length) {
+        result.textContent = 'Choose a CSV file first.';
+        result.className = 'device-result err';
+        return;
+      }
+
+      const form = new FormData();
+      form.append('file', input.files[0]);
+
+      result.textContent = 'Uploading…';
+      result.className = 'device-result';
+
+      try {
+        const response = await CTN.postForm('/api/installer/upload-readings', form);
+        result.textContent = response.message;
+        result.className = 'device-result ok';
+        input.value = '';
+        await init();
+      } catch (e) {
+        result.textContent = e.message;
+        result.className = 'device-result err';
+      }
+    }
+
     async function generatePairingCode() {
       const result = document.getElementById('device-result');
       const instructions = document.getElementById('pairing-instructions');
@@ -558,24 +688,39 @@
     }
 
     function renderPairingInstructions(response) {
-      // The code is a bearer credential with a short life, so the expiry is
-      // stated plainly rather than left for someone to discover on failure.
+      // The code is what a non-technical seller actually needs; the firmware
+      // details matter only to whoever sets the hardware up, so they are folded
+      // away rather than shown to everyone.
       return `
         <div class="pairing-box">
-          <div class="pairing-label">Your pairing code — expires in ${response.expires_in_minutes} minutes</div>
+          <div class="pairing-label">Your code — valid for ${response.expires_in_minutes} minutes</div>
           <div class="pairing-code">${esc(response.enrollment_code)}</div>
-          <ol class="pairing-steps">
-            <li>Open <code>firmware/ctn_sensor/</code> from the CTN repository.</li>
-            <li>Set <code>WIFI_SSID</code>, <code>WIFI_PASSWORD</code>, and
-                <code>ENROLLMENT_CODE</code> to the code above.</li>
-            <li>Give it a unique <code>DEVICE_ID</code> and flash your ESP32.</li>
-            <li>Power it on. It enrols itself and begins reporting.</li>
-          </ol>
-          <div class="pairing-note">
-            No sensor to hand? Try it from a terminal:
-            <code>python tools/sensor_sim.py pair --device MY-01 --code ${esc(response.enrollment_code)}</code>
-          </div>
+          <button class="btn-page" onclick="copyCode('${esc(response.enrollment_code)}')">Copy code</button>
+
+          <p class="pairing-next">
+            Give this to whoever is setting up your device. They enter it once,
+            switch the device on, and your readings start arriving here.
+          </p>
+
+          <details class="pairing-details">
+            <summary>Setting it up yourself?</summary>
+            <ol class="pairing-steps">
+              <li>Open <code>firmware/ctn_sensor/</code> from the CTN repository.</li>
+              <li>Fill in your WiFi name and password, and paste the code above
+                  into <code>ENROLLMENT_CODE</code>.</li>
+              <li>Give the device a unique name in <code>DEVICE_ID</code>, then flash your ESP32.</li>
+              <li>Power it on — it registers itself and begins reporting.</li>
+            </ol>
+            <div class="pairing-note">
+              No hardware yet? Simulate one:
+              <code>python tools/sensor_sim.py pair --device MY-01 --code ${esc(response.enrollment_code)}</code>
+            </div>
+          </details>
         </div>`;
+    }
+
+    function copyCode(code) {
+      navigator.clipboard?.writeText(code);
     }
 
     // ── Wallet linking ──

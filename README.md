@@ -34,8 +34,9 @@ Buyers self-register from the sign-up form. Admin accounts cannot be — the rol
 is rejected at validation, so the only way to create one is with server access.
 
 **As an installer** — the dashboard shows generation, CO₂ avoided, credits, and
-their value, with the signed reading history behind them. Pair a sensor with a
-code, or list verified credits for sale.
+their value, with the signed reading history behind them. Connect a sensor with a
+pairing code, or upload meter readings as a spreadsheet, then list verified
+credits for sale.
 
 **As a buyer** — browse the marketplace, reserve a batch, and complete a
 purchase. Reserve and confirm are separate steps, and a reservation expires
@@ -61,6 +62,8 @@ counting immediately.
 3. **Flash the device** with WiFi credentials and that code.
 4. **Power it on.** It generates a keypair, enrols itself, and starts reporting.
 5. **Credits accrue** as one tonne of avoided CO₂ accumulates.
+
+No sensor yet? The dashboard also offers a spreadsheet upload — see below.
 
 ```
      ESP32 ──── WiFi ──── HTTPS ────▶  POST /api/v1/readings
@@ -182,11 +185,23 @@ Private keys are written to `.sensor-keys/` (gitignored) — the closest local
 equivalent to a key that never leaves the device. Add `--api <url>` to point it
 at a deployed instance.
 
-**CSV import is kept on purpose.** Signed ingestion is the real path, but CSV
-upload remains for testing, for backfilling history, and for meters that cannot
-sign. Those rows carry only a server-computed content hash, which proves nothing
-about origin, so the API and dashboard label them `imported` rather than
-attested — the distinction is visible rather than glossed over.
+### Spreadsheet upload — a deliberate stopgap
+
+> [!IMPORTANT]
+> CSV upload exists **for this stage only**. Signed sensor data is the real
+> ingestion path; uploading is how the platform stays usable while hardware is
+> still being rolled out, and it is expected to fall away as devices arrive.
+
+Not everyone has a sensor yet, so a seller can add a meter from their dashboard
+and upload readings as a CSV of `device_id, timestamp, delta_kwh`. Only their own
+devices are accepted, so a row naming someone else's meter is refused rather than
+crediting the wrong account.
+
+An uploaded number is an assertion by whoever typed it. It carries no device
+signature, so it is recorded as **`imported`** rather than attested, shown that
+way in the dashboard and the proof endpoint, and its credits are gated exactly
+like a self-enrolled device's. The weaker guarantee is visible rather than
+quietly equated with a signed reading.
 
 ---
 
@@ -262,7 +277,7 @@ backend/
   data_utils.py               Cumulative meter readings → per-interval deltas
   ipfs_utils.py               Pinata certificate storage
   routes/                     auth · installer · marketplace · admin · ingest
-  tests/                      158 tests
+  tests/                      164 tests
 
 firmware/
   ctn_sensor/                 ESP32 sketch: enrol, sign, report over WiFi
@@ -308,7 +323,7 @@ listed or reserved, a buyer holding a reservation, or the last administrator.
 cd backend && ../.venv/bin/python -m pytest
 ```
 
-158 tests covering device attestation, self-service onboarding, authentication and role enforcement,
+164 tests covering device attestation, self-service onboarding, authentication and role enforcement,
 wallet-signature verification, credit issuance and idempotency, marketplace
 concurrency, device onboarding and approval, account transfer and closure, CSV
 validation, and the audit trail.
