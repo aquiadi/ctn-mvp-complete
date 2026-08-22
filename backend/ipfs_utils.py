@@ -13,6 +13,9 @@ class IPFSUploadError(RuntimeError):
     """Raised when a certificate could not be pinned."""
 
 
+_warned_about_credentials = False
+
+
 def upload_credit_to_ipfs(credit: dict) -> str:
     """
     Pin a credit certificate to IPFS and return its CID.
@@ -24,9 +27,12 @@ def upload_credit_to_ipfs(credit: dict) -> str:
     label = credit.get("credit_id", "new")
 
     if not config.PINATA_API_KEY or not config.PINATA_SECRET:
-        digest = _local_digest(credit)
-        print(f"⚠ No Pinata credentials — certificate for credit {label} not pinned")
-        return f"local-{digest}"
+        # Seeding issues dozens of certificates at once; one notice is enough.
+        global _warned_about_credentials
+        if not _warned_about_credentials:
+            _warned_about_credentials = True
+            print("⚠ No Pinata credentials — certificates are hashed locally, not pinned")
+        return f"local-{_local_digest(credit)}"
 
     try:
         response = requests.post(

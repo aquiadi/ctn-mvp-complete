@@ -194,14 +194,19 @@ boot if any is unsafe, so a misconfiguration fails loudly rather than silently:
 
 ### Container
 
-`backend/Dockerfile` produces a portable image for Docker-based hosts (Render,
-Fly.io, Cloud Run) or local runs. Railway is pinned to its Nixpacks builder, so
-the Dockerfile does not affect that deploy.
+The root `Dockerfile` produces a portable image for Docker-based hosts (Render,
+Fly.io, Cloud Run) or local runs. It builds from the repository root, since the
+API also serves the frontend directory.
 
 ```bash
-docker build -f backend/Dockerfile -t ctn-api .
+docker build -t ctn-api .
 docker run -p 8000:8000 -e JWT_SECRET="$(openssl rand -base64 48)" ctn-api
 ```
+
+It lives at the root rather than in `backend/` on purpose. Railway's service
+root is `backend/`, and a Dockerfile there takes precedence over the Nixpacks
+builder — Railway would then build with `backend/` as the context and the
+`COPY backend/...` paths would not resolve.
 
 ---
 

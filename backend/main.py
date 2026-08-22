@@ -95,8 +95,22 @@ app.include_router(marketplace_router)
 # ── Static pages ───────────────────────────────────────────────────────────
 
 def _page(filename: str):
+    """
+    Serve a frontend page.
+
+    The frontend is deployed separately (Vercel) in production, and a host that
+    builds only the backend directory will not have it. Report that plainly
+    instead of raising when the file is absent.
+    """
+
     def handler():
-        return FileResponse(os.path.join(FRONTEND_DIR, filename))
+        path = os.path.join(FRONTEND_DIR, filename)
+        if not os.path.isfile(path):
+            raise HTTPException(
+                status_code=404,
+                detail="This deployment serves the API only — the frontend is hosted separately.",
+            )
+        return FileResponse(path)
 
     return handler
 

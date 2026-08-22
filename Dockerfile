@@ -1,8 +1,14 @@
 # Portable container image for the CTN API.
 #
-# Railway is pinned to its Nixpacks builder via railway.json, so this file does
-# not affect that deploy. It is here for Docker-based targets (Render, Fly.io,
-# Cloud Run, or `docker run` locally) and to make the build reproducible.
+# Build context is the repository root, because the API serves the frontend from
+# ../frontend and both directories must be present.
+#
+#     docker build -t ctn-api .
+#
+# This file deliberately lives at the root rather than in backend/: Railway's
+# service root is backend/, and a Dockerfile there would take precedence over
+# its Nixpacks builder and then fail, since Railway would build with backend/ as
+# the context and these COPY paths would not resolve.
 
 FROM python:3.12-slim
 
