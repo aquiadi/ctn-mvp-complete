@@ -51,15 +51,78 @@ contract and the database agree.
 
 ---
 
+## Signed sensor data
+
+The platform never has to be trusted about where a reading came from.
+
+A sensor holds a secp256k1 private key that never leaves it and signs every
+reading it emits. CTN stores only the derived public address, so it can verify a
+reading but cannot forge one. Readings post straight to the API — the signature
+is the credential, so there is no session to expire and no shared API key to
+extract from firmware.
+
+```
+POST /api/v1/readings
+{ "readings": [ { "device_id": "ROOF-01", "sequence": 1042,
+                  "timestamp": "2026-06-01T06:00:00Z",
+                  "delta_kwh": 0.61, "signature": "0x…" } ] }
+```
+
+The device signs exactly this text, and the server reconstructs it to recover
+the signer:
+
+```
+CTN-READING-V1
+device:ROOF-01
+sequence:1042
+timestamp:2026-06-01T06:00:00Z
+delta_kwh:0.610000
+```
+
+Energy is signed at fixed precision because floats have no single textual form,
+and every field that affects the credit is covered — anything left out could be
+altered in transit without breaking the signature. `GET /api/v1/spec` serves the
+contract from the code that enforces it, so the documentation cannot drift.
+
+**What is rejected.** A signature from any other key. A packet whose energy,
+timestamp, device, or sequence was altered after signing. A replayed packet —
+sequences are monotonic per device, so a captured reading cannot be resubmitted.
+A batch is applied whole or not at all, since a partial apply would leave a gap
+indistinguishable from missing generation.
+
+**Verifying without trusting CTN.** `GET /api/v1/readings/{id}/proof` returns the
+signed text, the signature, and the device's public key. Recover the EIP-191
+signer and compare — a check anyone can run offline, in any language:
+
+```python
+from eth_account import Account
+from eth_account.messages import encode_defunct
+
+Account.recover_message(
+    encode_defunct(text=proof["signed_message"]),
+    signature=proof["device_signature"],
+) == proof["device_public_key"]
+```
+
+Device keys are public at `GET /api/v1/devices/{device_id}` — a key only the
+issuer can see would prove nothing to anyone else.
+
+**Imported readings are marked as such.** CSV upload still exists for meters
+that cannot sign. Those rows carry only a server-computed content hash, which
+proves nothing about origin, and the API and dashboard label them `imported`
+rather than attested.
+
+---
+
 ## How a credit is made
 
-1. **Onboard.** An installer submits a device; it stays inactive until an
-   administrator approves it. Approval is deliberate — a credit is only as
+1. **Onboard.** An installer submits a device with its public key; it stays
+   inactive until an administrator approves it. Approval is deliberate — a credit is only as
    trustworthy as the attestation of the device behind it, so self-registration
    would amount to self-issuing credits.
-2. **Ingest.** Readings arrive from the seed dataset or an admin CSV upload.
-   Each is hashed into a signature and stored under a fingerprint derived from
-   its device and timestamp, so re-ingesting the same data changes nothing.
+2. **Ingest.** Readings arrive signed from the device, or are imported from a
+   CSV. Each is stored under a fingerprint derived from its device and
+   timestamp, so re-ingesting the same data changes nothing.
 3. **Accumulate.** Unconsumed readings sum per device. At 1,000 kg of avoided
    CO₂ a credit is issued and its contributing readings are marked consumed.
    The remainder carries forward rather than being discarded.
@@ -119,10 +182,11 @@ backend/
   auth.py                     Sessions, password hashing, role dependencies
   chain.py                    Contract access, off the event loop
   database.py                 Schema, migrations, ingestion, credit issuance
+  attestation.py              Canonical signed message, signature verification
   data_utils.py               Cumulative meter readings → per-interval deltas
   ipfs_utils.py               Pinata certificate storage
-  routes/                     auth · installer · marketplace · admin
-  tests/                      113 tests
+  routes/                     auth · installer · marketplace · admin · ingest
+  tests/                      137 tests
 
 carboncredit-deploy/          Hardhat project for the CarbonCredit contract
 ```
@@ -162,10 +226,14 @@ listed or reserved, a buyer holding a reservation, or the last administrator.
 cd backend && ../.venv/bin/python -m pytest
 ```
 
-113 tests covering authentication and role enforcement, wallet-signature
-verification, credit issuance and idempotency, marketplace concurrency, device
-onboarding and approval, account transfer and closure, CSV validation, and the
-audit trail. They run against a temporary database and need no network access.
+137 tests covering device attestation, authentication and role enforcement,
+wallet-signature verification, credit issuance and idempotency, marketplace
+concurrency, device onboarding and approval, account transfer and closure, CSV
+validation, and the audit trail.
+
+The attestation tests drive a simulated sensor — a real keypair and the
+reference signing routine — and assert that forged, tampered, and replayed
+packets are refused, and that a proof verifies independently of the server. They run against a temporary database and need no network access.
 
 Several are regression tests for specific defects, among them two buyers
 concurrently reserving the same credit, daily averages divided by a hardcoded
@@ -275,9 +343,12 @@ state, but not a production carbon registry.
   records a transaction and marks credits sold.
 - **Single instance.** SQLite on a volume is durable but not horizontally
   scalable.
-- **Device data is admin-mediated.** Installers submit devices for approval and
-  readings arrive by CSV. Signed inverter or meter feeds, with no human upload,
-  are the next step.
+- **Not yet multi-tenant.** One platform instance serves one operator. Offering
+  this as a service others plug into needs organisation isolation, per-tenant
+  API scoping, and client libraries.
+- **Device provisioning is admin-mediated.** Key registration goes through an
+  approval queue by design; automated enrolment with hardware attestation
+  (secure element or TPM) would remove the human step without weakening it.
 - **Testnet only.** Amoy, not Polygon mainnet.
 - **The methodology is not accredited.** CO₂ is derived from the CEA grid
   emission factor; `CTN-SOLAR-V1` is this project's own standard, not Gold

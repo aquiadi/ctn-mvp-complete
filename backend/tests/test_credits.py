@@ -184,6 +184,21 @@ async def test_daily_averages_use_the_real_period(app_client, make_user):
         assert daily["kwh_per_day"] == expected
 
 
+def test_mixed_timestamp_formats_do_not_crash_the_period_calculation():
+    """
+    Regression test.
+
+    Signed readings carry an ISO offset and imported CSV rows do not. Both land
+    in the same columns, so MIN/MAX can return one of each, and subtracting an
+    aware datetime from a naive one raised — taking /stats down for everyone.
+    """
+    from main import _period_days
+
+    assert _period_days("2026-05-01T06:00:00Z", "2026-08-01 06:00:00") == 92
+    assert _period_days("2026-05-01 06:00:00", "2026-08-01T06:00:00Z") == 92
+    assert _period_days("2026-05-01T06:00:00+05:30", "2026-05-02T06:00:00Z") == 1
+
+
 async def test_compare_translates_co2_into_equivalents(app_client):
     body = (await app_client.get("/compare/1000")).json()
     assert body["kg_co2"] == 1000

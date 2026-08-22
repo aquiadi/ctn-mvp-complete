@@ -8,7 +8,7 @@ import asyncio
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +25,7 @@ from rate_limit import limiter
 from routes.admin_routes import log_admin_action
 from routes.admin_routes import router as admin_router
 from routes.auth_routes import router as auth_router
+from routes.ingest_routes import router as ingest_router
 from routes.installer_routes import router as installer_router
 from routes.marketplace_routes import router as marketplace_router
 
@@ -88,6 +89,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(installer_router)
+app.include_router(ingest_router)
 app.include_router(admin_router)
 app.include_router(marketplace_router)
 
@@ -142,10 +144,22 @@ def static_asset(filename: str):
 # ── Platform statistics ────────────────────────────────────────────────────
 
 def _parse_timestamp(value: str):
+    """
+    Parse a reading timestamp to a naive UTC datetime.
+
+    Signed sensor readings carry an ISO offset ("...Z") while imported CSV rows
+    are naive local time. Both end up in the same columns, so MIN and MAX can
+    return one of each — and subtracting an aware datetime from a naive one
+    raises, which would take down /stats for everyone.
+    """
     try:
-        return datetime.fromisoformat(str(value).strip())
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
+
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
 def _period_days(period_start: str, period_end: str) -> int:

@@ -42,6 +42,15 @@ class DeviceRegistration(BaseModel):
     device_id: str = Field(..., min_length=1, max_length=64)
     owner_email: str
     location: str = Field(default="India", max_length=120)
+    public_key: str = Field(default="", max_length=64)
+
+    @field_validator("public_key")
+    @classmethod
+    def validate_public_key(cls, value: str) -> str:
+        if not value:
+            return ""
+        import attestation
+        return attestation.normalise_public_key(value)
 
     @field_validator("device_id", "owner_email", "location")
     @classmethod
@@ -273,9 +282,13 @@ async def list_devices(admin: dict = Depends(require_admin)):
     """Every registered device with its owner and contribution to date."""
     devices = await database.fetch_all(
         """SELECT d.device_id, d.location, d.created_at,
+                  d.public_key, d.last_sequence,
                   u.email AS owner_email,
                   (SELECT COUNT(*) FROM generation_readings r
                    WHERE r.device_id = d.device_id) AS reading_count,
+                  (SELECT COUNT(*) FROM generation_readings r
+                   WHERE r.device_id = d.device_id
+                     AND r.device_signature IS NOT NULL) AS attested_count,
                   (SELECT COUNT(*) FROM credits c
                    WHERE c.device_id = d.device_id) AS credit_count,
                   (SELECT COALESCE(SUM(r.total_kwh), 0) FROM generation_readings r
@@ -305,9 +318,14 @@ async def register_device(req: DeviceRegistration, admin: dict = Depends(require
         raise HTTPException(409, f"Device '{req.device_id}' is already registered.")
 
     await db_execute_with_retry(
-        query="""INSERT INTO devices (device_id, owner_user_id, location)
-                 VALUES (:device_id, :owner_id, :location)""",
-        values={"device_id": req.device_id, "owner_id": owner["id"], "location": req.location},
+        query="""INSERT INTO devices (device_id, owner_user_id, location, public_key)
+                 VALUES (:device_id, :owner_id, :location, :public_key)""",
+        values={
+            "device_id": req.device_id,
+            "owner_id": owner["id"],
+            "location": req.location,
+            "public_key": req.public_key or None,
+        },
     )
     await log_admin_action(
         admin["id"], "register_device", "device", req.device_id,
@@ -393,12 +411,13 @@ async def approve_device_request(
 
     async with database.transaction():
         await database.execute(
-            query="""INSERT INTO devices (device_id, owner_user_id, location)
-                     VALUES (:device_id, :owner_id, :location)""",
+            query="""INSERT INTO devices (device_id, owner_user_id, location, public_key)
+                     VALUES (:device_id, :owner_id, :location, :public_key)""",
             values={
                 "device_id": record["device_id"],
                 "owner_id": record["requested_by"],
                 "location": record["location"] or "India",
+                "public_key": record.get("public_key"),
             },
         )
         await database.execute(

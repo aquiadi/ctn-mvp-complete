@@ -90,6 +90,11 @@ CREATE TABLE IF NOT EXISTS devices (
     device_id TEXT UNIQUE NOT NULL,
     owner_user_id INTEGER REFERENCES users(id),
     location TEXT DEFAULT 'India',
+    -- Address derived from the device's signing key. The private half stays on
+    -- the device, so the platform can verify a reading but never forge one.
+    public_key TEXT,
+    -- Highest sequence accepted so far; a replayed packet cannot exceed it.
+    last_sequence INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 
@@ -104,7 +109,14 @@ CREATE TABLE IF NOT EXISTS generation_readings (
     methodology TEXT,
     standard TEXT,
     location TEXT DEFAULT 'India',
+    -- Server-side content hash. Detects corruption at rest; proves nothing
+    -- about origin, because anyone who can write the row can recompute it.
     signature TEXT,
+    -- The device's own signature and the exact text it signed. Stored verbatim
+    -- so a third party can re-verify without trusting this database.
+    device_signature TEXT,
+    signed_message TEXT,
+    sequence INTEGER,
     credit_id INTEGER REFERENCES credits(id),
     consumed_by_credit_id INTEGER REFERENCES credits(id),
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
@@ -180,6 +192,7 @@ CREATE TABLE IF NOT EXISTS device_requests (
     device_id TEXT NOT NULL,
     requested_by INTEGER NOT NULL REFERENCES users(id),
     location TEXT DEFAULT 'India',
+    public_key TEXT,
     notes TEXT,
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'approved', 'rejected')),
@@ -189,6 +202,8 @@ CREATE TABLE IF NOT EXISTS device_requests (
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 
+CREATE INDEX IF NOT EXISTS idx_readings_attested
+    ON generation_readings(device_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_device_requests_status ON device_requests(status);
 CREATE INDEX IF NOT EXISTS idx_device_requests_user ON device_requests(requested_by);
 CREATE INDEX IF NOT EXISTS idx_credits_owner ON credits(owner_user_id);
@@ -205,6 +220,18 @@ CREATE INDEX IF NOT EXISTS idx_transactions_buyer ON marketplace_transactions(bu
 # Columns added after the initial release. SQLite has no "ADD COLUMN IF NOT
 # EXISTS", so existing databases are upgraded by inspecting the table first.
 MIGRATIONS = {
+    "devices": {
+        "public_key": "TEXT",
+        "last_sequence": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "generation_readings": {
+        "device_signature": "TEXT",
+        "signed_message": "TEXT",
+        "sequence": "INTEGER",
+    },
+    "device_requests": {
+        "public_key": "TEXT",
+    },
     "users": {
         # Set when an account is closed. The row is kept and anonymised rather
         # than deleted, because credits, transactions, and audit entries
@@ -334,13 +361,20 @@ async def _insert_readings(readings: Iterable[dict], owner_user_id: int) -> int:
         await database.execute(
             query="""INSERT INTO generation_readings
                 (reading_id, device_id, owner_user_id, total_kwh, co2_avoided_kg,
-                 timestamp, methodology, standard, location, signature)
+                 timestamp, methodology, standard, location, signature,
+                 device_signature, signed_message, sequence)
                 VALUES (:reading_id, :device_id, :owner_user_id, :total_kwh, :co2_avoided_kg,
-                        :timestamp, :methodology, :standard, :location, :signature)""",
+                        :timestamp, :methodology, :standard, :location, :signature,
+                        :device_signature, :signed_message, :sequence)""",
             values={
                 "reading_id": fingerprint,
                 "owner_user_id": reading.get("owner_user_id", owner_user_id),
                 "signature": _sign_reading(canonical),
+                # Present only for readings a device signed; CSV rows carry none,
+                # which is what distinguishes attested data from asserted data.
+                "device_signature": reading.get("device_signature"),
+                "signed_message": reading.get("signed_message"),
+                "sequence": reading.get("sequence"),
                 **canonical,
             },
         )

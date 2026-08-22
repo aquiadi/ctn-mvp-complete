@@ -134,6 +134,11 @@ LOGIN_RATE_LIMIT = os.getenv("LOGIN_RATE_LIMIT", "10/minute")
 SIGNUP_RATE_LIMIT = os.getenv("SIGNUP_RATE_LIMIT", "5/minute")
 CHAIN_WRITE_RATE_LIMIT = os.getenv("CHAIN_WRITE_RATE_LIMIT", "2/minute")
 
+# Devices report continuously and batch while offline, so this is far more
+# permissive than the human-facing limits. Replay protection, not throttling,
+# is what stops a device flooding the ledger.
+INGEST_RATE_LIMIT = os.getenv("INGEST_RATE_LIMIT", "120/minute")
+
 
 # ── Seeding ────────────────────────────────────────────────────────────────
 

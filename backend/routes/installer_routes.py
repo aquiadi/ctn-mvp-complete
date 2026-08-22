@@ -30,11 +30,23 @@ class DeviceRequestSubmission(BaseModel):
     device_id: str = Field(..., min_length=3, max_length=64)
     location: str = Field(default="India", max_length=120)
     notes: str = Field(default="", max_length=500)
+    # The address derived from the device's signing key. Optional so existing
+    # meters can still be onboarded, but without it the device's readings can
+    # only ever be imported, never attested.
+    public_key: str = Field(default="", max_length=64)
 
     @field_validator("device_id", "location", "notes")
     @classmethod
     def strip(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("public_key")
+    @classmethod
+    def validate_public_key(cls, value: str) -> str:
+        if not value:
+            return ""
+        import attestation
+        return attestation.normalise_public_key(value)
 
     @field_validator("device_id")
     @classmethod
@@ -169,7 +181,8 @@ async def installer_readings(
 
     readings = await database.fetch_all(
         query="""SELECT reading_id, device_id, total_kwh, co2_avoided_kg,
-                        timestamp, signature, consumed_by_credit_id
+                        timestamp, signature, device_signature, sequence,
+                        consumed_by_credit_id
                  FROM generation_readings WHERE owner_user_id = :user_id
                  ORDER BY timestamp DESC LIMIT :limit OFFSET :offset""",
         values={"user_id": user["id"], "limit": limit, "offset": offset},
@@ -181,7 +194,9 @@ async def installer_readings(
     total = row["cnt"] if row else 0
 
     return {
-        "readings": [dict(r) for r in readings],
+        "readings": [
+            {**dict(r), "attested": bool(r["device_signature"])} for r in readings
+        ],
         "total": total,
         "page": page,
         "pages": max(1, -(-total // limit)),
@@ -192,7 +207,7 @@ async def installer_readings(
 async def installer_devices(user: dict = Depends(require_installer)):
     """Registered devices with their contribution to date."""
     devices = await database.fetch_all(
-        query="""SELECT d.id, d.device_id, d.location, d.created_at,
+        query="""SELECT d.id, d.device_id, d.location, d.created_at, d.public_key,
                         (SELECT COUNT(*) FROM credits
                          WHERE device_id = d.device_id AND owner_user_id = :user_id) AS credit_count,
                         (SELECT COALESCE(SUM(total_kwh), 0) FROM credits
@@ -237,12 +252,14 @@ async def submit_device_request(
         )
 
     request_id = await db_execute_with_retry(
-        query="""INSERT INTO device_requests (device_id, requested_by, location, notes)
-                 VALUES (:device_id, :requested_by, :location, :notes)""",
+        query="""INSERT INTO device_requests
+                 (device_id, requested_by, location, public_key, notes)
+                 VALUES (:device_id, :requested_by, :location, :public_key, :notes)""",
         values={
             "device_id": req.device_id,
             "requested_by": user["id"],
             "location": req.location or "India",
+            "public_key": req.public_key or None,
             "notes": req.notes or None,
         },
     )
@@ -251,6 +268,7 @@ async def submit_device_request(
         "status": "pending_review",
         "request_id": request_id,
         "device_id": req.device_id,
+        "attestation_enabled": bool(req.public_key),
         "message": "Your device has been submitted for review. "
                    "It starts recording generation once an administrator approves it.",
     }
@@ -260,7 +278,7 @@ async def submit_device_request(
 async def list_device_requests(user: dict = Depends(require_installer)):
     """This installer's submissions and where each one stands."""
     requests = await database.fetch_all(
-        query="""SELECT id, device_id, location, notes, status,
+        query="""SELECT id, device_id, location, public_key, notes, status,
                         review_note, reviewed_at, created_at
                  FROM device_requests WHERE requested_by = :user_id
                  ORDER BY created_at DESC""",
