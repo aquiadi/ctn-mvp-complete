@@ -2,43 +2,76 @@
 
 [![CI](https://github.com/aquiadi/ctn-mvp-complete/actions/workflows/ci.yml/badge.svg)](https://github.com/aquiadi/ctn-mvp-complete/actions/workflows/ci.yml)
 
-A platform for turning metered solar generation into verifiable carbon credits:
-readings are ingested and signed, accumulated into one-tonne credits, pinned to
-IPFS, minted on Polygon (Amoy testnet), traded on a marketplace, and finally
-retired on-chain to complete an offset.
+Turns metered solar generation into carbon credits you can actually check.
+Readings are signed on arrival, accumulated until a full tonne of CO₂ has been
+avoided, certified to IPFS, minted on Polygon, traded on a marketplace, and
+retired on-chain to complete the offset.
 
-**Live:** frontend on [Vercel](https://ctn-mvp-complete-j52y.vercel.app) ·
-API on [Railway](https://ctn-api-railway-production.up.railway.app/api).
+Every figure the site shows traces back to a meter reading and a transaction
+hash. Nothing is estimated, and nothing is hardcoded in the frontend.
+
+| | |
+|---|---|
+| **Live site** | https://ctn-mvp-complete-j52y.vercel.app |
+| **API** | https://ctn-api-railway-production.up.railway.app/api |
+| **API docs** | https://ctn-api-railway-production.up.railway.app/docs |
+| **Contract** | [`0x1b4F…7Cf6`](https://amoy.polygonscan.com/address/0x1b4F5A7CEf1c2CFb914A5642CC82F887AB0C7Cf6) on Polygon Amoy |
+
+> [!NOTE]
+> A testnet MVP. Payments are simulated and clearly labelled as such throughout;
+> no money moves. Credits are minted on Amoy, not mainnet.
 
 ---
 
-## Architecture
+## Try it
 
-```
-frontend/                     Static pages, no build step
-  static/ctn.js               API base resolution, auth, HTTP, formatting
-  static/wallet.js            EIP-1193 wallet linking
-  index.html                  Public landing page and credit verification
-  login.html  app.html  app-history.html  marketplace.html  admin.html
-  profile.html                Account details, email transfer, closure
+| Role | Email | Password |
+|---|---|---|
+| Installer | `demo@installer.ctn` | `demo-installer-2024` |
+| Admin | `admin@ctn.org` | set via `ADMIN_PASSWORD` |
 
-backend/
-  config.py                   Every tunable value, read from the environment
-  main.py                     App wiring, public read routes, on-chain endpoints
-  auth.py                     Sessions, password hashing, role dependencies
-  chain.py                    Contract access (off the event loop)
-  database.py                 Schema, migrations, ingestion, credit issuance
-  data_utils.py               Cumulative meter readings → per-interval deltas
-  ipfs_utils.py               Pinata certificate storage
-  rate_limit.py               Shared limiter
-  routes/                     auth · installer · marketplace · admin
-  tests/                      pytest suite
+Buyers self-register from the sign-up form. Admin accounts cannot be — the role
+is rejected at validation, so the only way to create one is with server access.
 
-carboncredit-deploy/          Hardhat project for the CarbonCredit contract
-```
+**As an installer** — the dashboard shows generation, CO₂ avoided, credits, and
+their value, with the signed reading history behind them. Submit a device for
+approval, or list verified credits for sale.
 
-Constants live in `backend/config.py` and are published to the browser through
-`GET /config`. No price, threshold, or address is written into the frontend.
+**As a buyer** — browse the marketplace, reserve a batch, and complete a
+purchase. Reserve and confirm are separate steps, and a reservation expires
+after 15 minutes so an abandoned checkout cannot hold a credit hostage.
+
+**As an admin** — approve device submissions, ingest reading CSVs, mint and
+retire credits on-chain, and read the audit trail. Every administrative action
+is recorded with who did it and why.
+
+**Without an account** — the landing page lists every issued credit. Click one
+to verify it: the API resolves its on-chain record and reports whether the
+contract and the database agree.
+
+---
+
+## How a credit is made
+
+1. **Onboard.** An installer submits a device; it stays inactive until an
+   administrator approves it. Approval is deliberate — a credit is only as
+   trustworthy as the attestation of the device behind it, so self-registration
+   would amount to self-issuing credits.
+2. **Ingest.** Readings arrive from the seed dataset or an admin CSV upload.
+   Each is hashed into a signature and stored under a fingerprint derived from
+   its device and timestamp, so re-ingesting the same data changes nothing.
+3. **Accumulate.** Unconsumed readings sum per device. At 1,000 kg of avoided
+   CO₂ a credit is issued and its contributing readings are marked consumed.
+   The remainder carries forward rather than being discarded.
+4. **Certify.** A certificate naming those readings is pinned to IPFS.
+5. **Mint.** An admin mints the credit to a wallet. The on-chain id, transaction
+   hash, and CID are recorded against it.
+6. **Trade.** The installer lists it; a buyer reserves and purchases it.
+7. **Retire.** An admin retires it on-chain, completing the offset.
+
+`GET /verify/{credit_id}` resolves the stored on-chain id and compares the
+contract's recorded quantities against the database, reporting whether the two
+ledgers agree — a direct lookup, not a scan.
 
 ---
 
@@ -55,91 +88,71 @@ cd backend && ../.venv/bin/python -m uvicorn main:app --reload --port 8000
 Open <http://localhost:8000>. The backend serves the frontend, so the pages
 target the same origin automatically — no configuration needed.
 
-On first start the schema is created, the admin account is seeded, and the
-public seed dataset is pulled from IPFS and aggregated into credits.
+First start creates the schema, seeds the admin account, and pulls the public
+seed dataset from IPFS into credits. There is no build step for the frontend.
 
 ### Configuration
 
 Copy `.env.example` and fill in what you need. Every setting has a development
-default; the security-relevant ones are enforced when `ENVIRONMENT=production`,
-and the process refuses to start if they are missing.
-
-Two capabilities degrade gracefully when unconfigured rather than failing at
-runtime:
+default. Two capabilities degrade rather than fail when unconfigured:
 
 | Missing | Effect |
 |---|---|
-| `PRIVATE_KEY` | Minting and retirement return `503`. Everything else works. |
-| `PINATA_API_KEY` / `PINATA_SECRET` | Certificates are hashed locally and marked unpinned, never given a fake CID. |
+| `PRIVATE_KEY` | Minting and retirement return `503`; everything else works |
+| `PINATA_API_KEY` / `PINATA_SECRET` | Certificates are hashed locally and marked unpinned, never given a fake CID |
 
 ---
 
-## Demo credentials
+## Architecture
 
-Development defaults, overridable via `ADMIN_PASSWORD` and
-`DEMO_INSTALLER_PASSWORD`. Change them before deploying — the server warns at
-startup while they are in place and refuses to start in production.
+```
+frontend/                     Static pages, no build step
+  static/ctn.js               API base resolution, auth, HTTP, formatting
+  static/wallet.js            EIP-1193 wallet linking
+  index.html                  Landing page and credit verification
+  login.html  app.html  app-history.html
+  marketplace.html  admin.html  profile.html
 
-| Role | Email | Password |
-|---|---|---|
-| Admin | `admin@ctn.org` | `ctn-admin-2024` |
-| Installer | `demo@installer.ctn` | `demo-installer-2024` |
+backend/
+  config.py                   Every tunable value, read from the environment
+  main.py                     App wiring, public routes, on-chain operations
+  auth.py                     Sessions, password hashing, role dependencies
+  chain.py                    Contract access, off the event loop
+  database.py                 Schema, migrations, ingestion, credit issuance
+  data_utils.py               Cumulative meter readings → per-interval deltas
+  ipfs_utils.py               Pinata certificate storage
+  routes/                     auth · installer · marketplace · admin
+  tests/                      113 tests
 
-Buyer accounts are self-registered from the sign-up form. Admin accounts cannot
-be — the role is rejected at validation.
+carboncredit-deploy/          Hardhat project for the CarbonCredit contract
+```
 
----
+Constants live in `backend/config.py` and reach the browser through
+`GET /config`. No price, threshold, or contract address is written into the
+frontend, so changing a value is a config change rather than a code change.
 
-## How a credit is made
-
-0. **Onboard.** An installer submits a device from their dashboard; it stays
-   inactive until an administrator approves it. Approval is deliberate rather
-   than automatic — a credit is only as trustworthy as the attestation of the
-   device behind it, so self-registration would amount to self-issuing credits.
-   Both approvals and rejections are audit-logged, and a rejection carries a
-   reason the installer can see.
-1. **Ingest.** Readings arrive from the seed dataset or an admin CSV upload.
-   Each is hashed into a signature and stored under a fingerprint derived from
-   its device and timestamp, so re-ingesting the same data is a no-op.
-2. **Accumulate.** Unconsumed readings are summed per device. Once 1,000 kg of
-   avoided CO₂ has accrued, a discrete credit is issued and its contributing
-   readings are marked consumed. Any remainder carries forward.
-3. **Certify.** A certificate naming the contributing readings is pinned to
-   IPFS at issuance.
-4. **Mint.** An admin mints the credit to a wallet. The on-chain id, transaction
-   hash, and CID are recorded against the credit.
-5. **Trade.** The installer lists it; a buyer reserves and purchases it.
-   Reservations expire after 15 minutes and are swept back to the marketplace.
-6. **Retire.** An admin retires it on-chain, completing the offset.
-
-Verification (`GET /verify/{credit_id}`) resolves the stored on-chain id and
-compares the contract's recorded quantities against the database, reporting
-whether the two ledgers agree.
+web3.py is synchronous, so every contract call is dispatched to a worker thread.
+Calling it directly from a coroutine would stall the event loop for the whole
+round trip, and a signed transaction can take tens of seconds.
 
 ---
 
-## Reviewer walkthrough
+## Accounts
 
-**Installer.** Sign in as the demo installer. `/app` shows generation totals and
-signed readings; `/app/history` filters credits by lifecycle status. Listing
-credits requires a linked wallet — the demo account has one so the flow can be
-exercised; a real installer links their own by signing a challenge with
-MetaMask, and the private key never leaves the wallet.
+Every role has a profile page at `/profile`.
 
-**Marketplace.** Sign up as a buyer, browse the listings, and complete a
-purchase. Reserve and confirm are separate steps; payment is simulated and
-labelled as such throughout. Installers can browse but the buy action is
-disabled for them.
+**Transferring.** Changing the email address moves control of the account and
+everything it owns. The current password is required, so a borrowed session
+cannot quietly take it over.
 
-**Admin.** Sign in as the admin. *Credits* is the ledger, with mint and retire
-actions and links to Polygonscan. *Devices & data* holds the pending device
-queue, the registered-device list, and ingests reading CSVs (`device_id, timestamp, delta_kwh`) — an invalid row rejects the
-whole file rather than importing part of it. *Transactions*, *Audit log*, and
-*Health* show marketplace activity, every admin action with its stated reason,
-and RPC/contract/wallet status.
+**Closing.** Requires the password and a typed confirmation. The row is retained
+and anonymised rather than deleted — email and wallet cleared, login disabled —
+because credits, transactions, and audit entries reference it, and removing it
+would break the trail that makes those credits verifiable. The freed address can
+be registered again.
 
-Mint and retire need `PRIVATE_KEY` set. Without it the admin panel says so up
-front instead of failing at the point of use.
+Closure is refused while anything is mid-transaction: an installer with credits
+listed or reserved, a buyer holding a reservation, or the last administrator.
 
 ---
 
@@ -152,151 +165,127 @@ cd backend && ../.venv/bin/python -m pytest
 113 tests covering authentication and role enforcement, wallet-signature
 verification, credit issuance and idempotency, marketplace concurrency, device
 onboarding and approval, account transfer and closure, CSV validation, and the
-audit trail. They run against a temporary database and need
-no network access.
+audit trail. They run against a temporary database and need no network access.
 
-Several are regression tests for specific defects, including two buyers
-concurrently reserving the same credit, and daily averages computed against a
-hardcoded period rather than the real data.
+Several are regression tests for specific defects, among them two buyers
+concurrently reserving the same credit, daily averages divided by a hardcoded
+period instead of the real one, and a request creating a device without review.
 
----
-
-## Continuous integration
+### Continuous integration
 
 `.github/workflows/ci.yml` runs on every push and pull request to `master`:
-
-- **Backend** — installs pinned dependencies, lints with pyflakes, runs the full
-  pytest suite.
-- **Frontend** — parses every shared module and inline page script, so a syntax
-  error in a page can't reach the deployed site.
+the backend job installs pinned dependencies, lints with pyflakes, and runs the
+suite; the frontend job parses every shared module and inline page script, so a
+syntax error in a page cannot reach the deployed site.
 
 ---
 
 ## Deployment
 
-The two tiers deploy independently and are wired together by CORS and the
-frontend's API-base resolution:
-
-| Tier | Host | Serves |
+| Tier | Host | Config |
 |---|---|---|
-| Frontend | Vercel | The static pages (`vercel.json` maps clean URLs to files) |
-| API | Railway | The FastAPI backend (`backend/railway.json`) |
+| Frontend | Vercel | `frontend/vercel.json` maps clean URLs to files |
+| API | Railway | `backend/railway.json`, Nixpacks builder, `/healthz` probe |
 
-Both auto-deploy on push to `master`. The frontend calls the Railway API and
-falls back to a bearer token when the cross-origin session cookie is blocked, so
-no per-environment frontend build is required.
+Both auto-deploy on push to `master`. The frontend resolves its API base at
+runtime, so the same files work locally and in production without a rebuild.
 
-### Persistent storage
+### Required in production
 
-The API stores data in SQLite. A container filesystem is ephemeral, so unless
-the database sits on a mounted volume every deploy restarts from an empty file
-and all accounts, listings, and purchases are lost.
-
-On Railway: open the service, **Variables → + New Volume**, mount it at `/data`,
-then set `DATABASE_URL=sqlite:////data/ctn.db` (four slashes — three for the
-scheme, one for the absolute path). The directory is created on first boot, and
-in production the server warns at startup if the database is not on a volume.
-
-This keeps a single instance durable, which is what SQLite supports. Serving
-from more than one instance needs a networked database such as Postgres; the
-`databases` layer already speaks it, and the SQLite-specific parts are the raw
-DDL in `_apply_schema`, the `PRAGMA table_info` migration check, and
-`GROUP_CONCAT` in the marketplace listing query.
-
-**Required production environment variables** (set on the API host). With
-`ENVIRONMENT=production` the process validates these at startup and refuses to
-boot if any is unsafe, so a misconfiguration fails loudly rather than silently:
+With `ENVIRONMENT=production` these are validated at startup and the process
+refuses to boot if any is unsafe, so a misconfiguration fails loudly instead of
+silently running insecure.
 
 | Variable | Why |
 |---|---|
-| `ENVIRONMENT=production` | Turns the startup warnings into hard failures |
-| `JWT_SECRET` | Signs sessions. Generate with `openssl rand -base64 48` |
+| `ENVIRONMENT=production` | Turns startup warnings into hard failures |
+| `JWT_SECRET` | Signs sessions — `openssl rand -base64 48` |
 | `ADMIN_PASSWORD` | Must differ from the documented demo password |
 | `COOKIE_SECURE=true` | Sends the session cookie only over HTTPS |
-| `CORS_ORIGINS` | Exact frontend origin(s), e.g. the Vercel URL |
-| `DATABASE_URL` | Path inside the mounted volume, or data is lost on redeploy |
-| `PRIVATE_KEY` | Optional — enables minting and retirement |
-| `PINATA_API_KEY` / `PINATA_SECRET` | Optional — enables real IPFS pinning |
+| `CORS_ORIGINS` | Exact frontend origin(s) |
+| `DATABASE_URL` | Must point inside a mounted volume — see below |
+| `PRIVATE_KEY` | Optional; enables minting and retirement |
+| `PINATA_API_KEY` / `PINATA_SECRET` | Optional; enables real IPFS pinning |
+
+### Persistent storage
+
+A container filesystem is ephemeral. Unless the database sits on a mounted
+volume, every deploy restarts from an empty file and all accounts, listings, and
+purchases are lost.
+
+Mount a volume at `/data` and set `DATABASE_URL=sqlite:////data/ctn.db` — four
+slashes, three for the scheme and one for the absolute path. The directory is
+created on first boot, and in production the server warns at startup if the
+database is not on a volume.
+
+```bash
+railway volume update -m /data
+railway variable set DATABASE_URL=sqlite:////data/ctn.db
+```
+
+This keeps a single instance durable, which is what SQLite supports. Serving
+from several instances needs a networked database; the `databases` layer already
+speaks Postgres, and the SQLite-specific parts are the raw DDL in
+`_apply_schema`, the `PRAGMA table_info` migration check, and `GROUP_CONCAT` in
+the marketplace listing query.
 
 ### Container
 
-The root `Dockerfile` produces a portable image for Docker-based hosts (Render,
-Fly.io, Cloud Run) or local runs. It builds from the repository root, since the
-API also serves the frontend directory.
+The root `Dockerfile` builds a portable image for Docker-based hosts. It builds
+from the repository root because the API also serves the frontend directory.
 
 ```bash
 docker build -t ctn-api .
 docker run -p 8000:8000 -e JWT_SECRET="$(openssl rand -base64 48)" ctn-api
 ```
 
-It lives at the root rather than in `backend/` on purpose. Railway's service
+It lives at the root rather than in `backend/` deliberately: Railway's service
 root is `backend/`, and a Dockerfile there takes precedence over the Nixpacks
-builder — Railway would then build with `backend/` as the context and the
-`COPY backend/...` paths would not resolve.
+builder, after which Railway builds with `backend/` as the context and the
+`COPY backend/…` paths no longer resolve.
 
 ---
 
-## Accounts
+## Security
 
-Every role has a profile page at `/profile`.
-
-**Transferring an account.** Changing the email address moves control of the
-account and everything it owns to whoever holds that address. The current
-password is required, so a borrowed session cannot quietly take it over.
-
-**Closing an account.** Requires the password and a typed confirmation. The user
-row is retained and anonymised rather than deleted — the email and wallet are
-cleared and the login disabled, but the row itself stays because credits,
-marketplace transactions, and audit entries reference it, and removing it would
-break the trail that makes those credits verifiable. The freed email address can
-be registered again.
-
-Closure is refused while anything is mid-transaction: an installer with credits
-listed or reserved, a buyer holding a reservation, or the last remaining
-administrator.
-
----
-
-## Security notes
-
-- Sessions are httpOnly cookies; a bearer-token fallback covers cross-origin
-  deployments where third-party cookies are blocked.
-- `SameSite=None` requires `Secure`, which a plain-HTTP localhost cannot
-  satisfy, so cookies default to `SameSite=Lax` outside production.
-- CORS is an explicit allow-list. A wildcard-suffix pattern is not usable here:
+- Sessions are httpOnly cookies, with a bearer-token fallback for cross-origin
+  deployments where browsers block third-party cookies.
+- `SameSite=None` requires `Secure`, which plain-HTTP localhost cannot satisfy,
+  so cookies default to `SameSite=Lax` outside production.
+- CORS is an explicit allow-list. A wildcard-suffix pattern is unusable here:
   the API sends credentials, so any matching host could act as a signed-in user.
 - Credential endpoints are rate limited. Login failures return one message for
   both unknown addresses and wrong passwords, so accounts cannot be enumerated.
-- Admin actions are audited before they execute, so failed attempts are recorded
-  too.
-- With `ENVIRONMENT=production` the configuration is validated at startup and an
-  unsafe setting aborts the boot, so the service cannot come up with a known
-  signing key or a demo password still in place.
+- Wallet linking verifies an EIP-191 signature over a single-use nonce. The
+  private key never leaves the wallet.
+- Admin actions are audit-logged before they execute, so failed attempts are
+  recorded too.
+- Anyone can register as an installer or buyer, by design. New accounts hold
+  nothing and can do nothing until an administrator approves a device, so
+  automated sign-ups are inert.
 
-> [!CAUTION]
-> **Exposed secrets in history.** Earlier commits (still reachable in this
-> public repository) contain `backend/cookie.txt` — a session token signed with
-> the old default `JWT_SECRET`, which is also in history — plus SQLite databases
-> holding bcrypt password hashes. Until the API sets its own `JWT_SECRET`, that
-> default key can be used to forge admin sessions against the live backend.
->
-> Required: set a fresh `JWT_SECRET` and `ADMIN_PASSWORD` on the API host (this
-> both closes the hole and invalidates the leaked token). Recommended: rewrite
-> history to purge the blobs — for example with
-> [`git filter-repo`](https://github.com/newren/git-filter-repo):
->
-> ```bash
-> git filter-repo --invert-paths \
->   --path backend/cookie.txt \
->   --path backend/ctn.db --path backend/ctn_v2.db --path backend/test.db
-> ```
->
-> This rewrites every commit and requires a force-push, so it is left as a
-> deliberate manual step.
+---
+
+## Known limitations
+
+Honest about what this is — an MVP with real cryptography and real on-chain
+state, but not a production carbon registry.
+
+- **Payments are simulated.** No processor is integrated; the marketplace
+  records a transaction and marks credits sold.
+- **Single instance.** SQLite on a volume is durable but not horizontally
+  scalable.
+- **Device data is admin-mediated.** Installers submit devices for approval and
+  readings arrive by CSV. Signed inverter or meter feeds, with no human upload,
+  are the next step.
+- **Testnet only.** Amoy, not Polygon mainnet.
+- **The methodology is not accredited.** CO₂ is derived from the CEA grid
+  emission factor; `CTN-SOLAR-V1` is this project's own standard, not Gold
+  Standard or Verra.
 
 ---
 
 ## Stack
 
-Python (FastAPI, SQLite, web3.py) · vanilla HTML/CSS/JS, no build step ·
+Python (FastAPI, SQLite, web3.py) · vanilla HTML/CSS/JS with no build step ·
 Solidity on Polygon Amoy · IPFS via Pinata.
