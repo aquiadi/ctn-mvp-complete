@@ -76,3 +76,58 @@ async def test_applying_the_schema_twice_is_safe(app_client):
     """Startup runs against an existing database on every restart."""
     await database._apply_schema()
     await database._apply_schema()
+
+
+async def test_indexes_are_created_after_column_migrations(app_client, tmp_path):
+    """
+    Regression test.
+
+    An index named a column added by a later migration. On an existing database
+    CREATE TABLE IF NOT EXISTS is a no-op, so the index was created before
+    ALTER TABLE added the column and startup died with "no such column",
+    returning 502 for every request against any pre-existing deployment.
+    """
+    import sqlite3
+
+    import aiosqlite
+
+    legacy = tmp_path / "legacy.db"
+    # A database predating the attestation columns.
+    conn = sqlite3.connect(legacy)
+    conn.executescript(
+        """
+        CREATE TABLE generation_readings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reading_id TEXT UNIQUE NOT NULL,
+            device_id TEXT,
+            consumed_by_credit_id INTEGER,
+            owner_user_id INTEGER
+        );
+        CREATE TABLE devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT UNIQUE NOT NULL
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    async with aiosqlite.connect(legacy) as raw_db:
+        await raw_db.executescript(database.SCHEMA_SQL)
+        for table, columns in database.MIGRATIONS.items():
+            cursor = await raw_db.execute(f"PRAGMA table_info({table})")
+            existing = {row[1] for row in await cursor.fetchall()}
+            for column, column_type in columns.items():
+                if column not in existing:
+                    await raw_db.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+                    )
+        # The step that used to fail.
+        await raw_db.executescript(database.INDEXES_SQL)
+        await raw_db.commit()
+
+        cursor = await raw_db.execute("PRAGMA table_info(generation_readings)")
+        columns = {row[1] for row in await cursor.fetchall()}
+
+    assert "sequence" in columns
+    assert "device_signature" in columns

@@ -201,11 +201,12 @@ CREATE TABLE IF NOT EXISTS device_requests (
     review_note TEXT,
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 );
+"""
 
-CREATE INDEX IF NOT EXISTS idx_readings_attested
-    ON generation_readings(device_id, sequence);
-CREATE INDEX IF NOT EXISTS idx_device_requests_status ON device_requests(status);
-CREATE INDEX IF NOT EXISTS idx_device_requests_user ON device_requests(requested_by);
+# Indexes are applied after the column migrations below, not with the tables.
+# On an existing database CREATE TABLE IF NOT EXISTS is a no-op, so an index
+# naming a newly added column would be created before ALTER TABLE adds it.
+INDEXES_SQL = """
 CREATE INDEX IF NOT EXISTS idx_credits_owner ON credits(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_credits_status ON credits(status);
 CREATE INDEX IF NOT EXISTS idx_credits_device ON credits(device_id);
@@ -213,6 +214,9 @@ CREATE INDEX IF NOT EXISTS idx_credits_reserved ON credits(reserved_by, reserved
 CREATE INDEX IF NOT EXISTS idx_credits_on_chain ON credits(on_chain_id);
 CREATE INDEX IF NOT EXISTS idx_readings_owner ON generation_readings(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_readings_unconsumed ON generation_readings(consumed_by_credit_id);
+CREATE INDEX IF NOT EXISTS idx_readings_attested ON generation_readings(device_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_device_requests_status ON device_requests(status);
+CREATE INDEX IF NOT EXISTS idx_device_requests_user ON device_requests(requested_by);
 CREATE INDEX IF NOT EXISTS idx_audit_admin ON audit_log(admin_user_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_buyer ON marketplace_transactions(buyer_user_id);
 """
@@ -300,6 +304,8 @@ async def _apply_schema():
                     await raw_db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
                     print(f"✓ Added column {table}.{column}")
 
+        # Only now that every column exists can the indexes reference them.
+        await raw_db.executescript(INDEXES_SQL)
         await raw_db.commit()
 
 
