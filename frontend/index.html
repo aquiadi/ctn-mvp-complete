@@ -809,9 +809,9 @@
         <a href="#verify" class="nav-section-link">Verify</a>
       </div>
     </div>
-    <div class="nav-right">
+    <div class="nav-right" id="nav-right">
       <a href="/marketplace" class="nav-link">Marketplace</a>
-      <a href="/login" class="btn-nav">Sign in</a>
+      <a href="/login" class="btn-nav" id="nav-auth">Sign in</a>
     </div>
   </nav>
 
@@ -1250,6 +1250,30 @@
     }
 
     init();
+
+    // ── Session-aware header ──
+    //
+    // The homepage is public, so it renders signed out and corrects itself once
+    // the session is known. Showing a "Sign in" button to someone already
+    // signed in sends them to a login page that immediately bounces them back.
+
+    CTN.currentUser().then(user => {
+      if (!user) return;
+
+      const container = document.getElementById('nav-right');
+      const dashboard = CTN.homeFor(user.role);
+
+      container.innerHTML = `
+        <a href="/marketplace" class="nav-link">Marketplace</a>
+        <a href="${dashboard}" class="nav-link">${user.role === 'admin' ? 'Admin' : 'Dashboard'}</a>
+        <a href="/profile" class="nav-link" title="${esc(user.email)}">Account</a>
+        <a href="#" class="btn-nav" id="nav-signout">Sign out</a>`;
+
+      document.getElementById('nav-signout').addEventListener('click', event => {
+        event.preventDefault();
+        CTN.logout('/');
+      });
+    });
 
     // ── Server-published pricing ──
     //

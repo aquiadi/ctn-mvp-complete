@@ -129,10 +129,30 @@ async def list_installers(admin: dict = Depends(require_admin)):
                   (SELECT COUNT(*) FROM devices WHERE owner_user_id = u.id) AS device_count,
                   (SELECT COALESCE(SUM(total_kwh), 0) FROM credits
                    WHERE owner_user_id = u.id) AS total_kwh
-           FROM users u WHERE u.role = 'installer'
+           FROM users u WHERE u.role = 'installer' AND u.deleted_at IS NULL
            ORDER BY u.created_at DESC"""
     )
     return {"installers": [dict(i) for i in installers]}
+
+
+@router.get("/buyers")
+async def list_buyers(admin: dict = Depends(require_admin)):
+    """Buyer accounts with what they have purchased and spent."""
+    buyers = await database.fetch_all(
+        """SELECT u.id, u.email, u.wallet_address, u.created_at,
+                  (SELECT COUNT(*) FROM marketplace_transactions
+                   WHERE buyer_user_id = u.id AND payment_status = 'completed')
+                      AS purchase_count,
+                  (SELECT COALESCE(SUM(quantity), 0) FROM marketplace_transactions
+                   WHERE buyer_user_id = u.id AND payment_status = 'completed')
+                      AS credits_bought,
+                  (SELECT COALESCE(SUM(total_amount_inr), 0) FROM marketplace_transactions
+                   WHERE buyer_user_id = u.id AND payment_status = 'completed')
+                      AS total_spent_inr
+           FROM users u WHERE u.role = 'buyer' AND u.deleted_at IS NULL
+           ORDER BY u.created_at DESC"""
+    )
+    return {"buyers": [dict(b) for b in buyers]}
 
 
 @router.get("/credits")

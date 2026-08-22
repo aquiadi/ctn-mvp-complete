@@ -100,6 +100,7 @@
       <div class="nav-tabs">
         <button class="nav-tab active" onclick="showSection('overview')">Overview</button>
         <button class="nav-tab" onclick="showSection('installers')">Installers</button>
+        <button class="nav-tab" onclick="showSection('buyers')">Buyers</button>
         <button class="nav-tab" onclick="showSection('credits')">Credits</button>
         <button class="nav-tab" onclick="showSection('devices')">Devices &amp; data</button>
         <button class="nav-tab" onclick="showSection('transactions')">Transactions</button>
@@ -108,6 +109,7 @@
       </div>
     </div>
     <div class="nav-right">
+      <a href="/profile" class="nav-link" style="font-size:11px;color:var(--text2);text-decoration:none;">Account</a>
       <span style="font-size:11px;color:var(--text3);" id="admin-email">—</span>
       <button class="btn-sm" onclick="logout()">Sign out</button>
     </div>
@@ -133,6 +135,15 @@
       <div class="card" id="installers-card">
         <div class="card-title">All installer accounts</div>
         <div id="installers-list"><div class="empty-note">Loading...</div></div>
+      </div>
+    </div>
+
+    <!-- BUYERS -->
+    <div class="section" id="sec-buyers">
+      <div class="page-header"><p class="page-label">Users</p><h1>Buyers</h1></div>
+      <div class="card">
+        <div class="card-title">All buyer accounts</div>
+        <div id="buyers-list"><div class="empty-note">Loading...</div></div>
       </div>
     </div>
 
@@ -268,6 +279,7 @@
     const LOADERS = {
       overview: loadOverview,
       installers: loadInstallers,
+      buyers: loadBuyers,
       credits: () => loadCredits(1),
       devices: () => { loadDeviceRequests(); loadDevices(); },
       transactions: () => loadTransactions(1),
@@ -382,6 +394,27 @@
               <div>${CTN.fmt.number(i.total_kwh)}</div>
             </div>`).join('')}`
           : '<div class="empty-note">No installer accounts yet.</div>';
+      } catch (e) {
+        list.innerHTML = `<div class="empty-note">${esc(e.message)}</div>`;
+      }
+    }
+
+    async function loadBuyers() {
+      const list = document.getElementById('buyers-list');
+      try {
+        const data = await CTN.get('/api/admin/buyers');
+        list.innerHTML = data.buyers.length ? `
+          <div class="table-row cols-4 header">
+            <div>Email</div><div>Purchases</div><div>Credits bought</div><div>Total spent</div>
+          </div>
+          ${data.buyers.map(b => `
+            <div class="table-row cols-4">
+              <div>${esc(b.email)}</div>
+              <div>${CTN.fmt.number(b.purchase_count)}</div>
+              <div>${CTN.fmt.number(b.credits_bought)}</div>
+              <div>${CTN.fmt.inr(b.total_spent_inr)}</div>
+            </div>`).join('')}`
+          : '<div class="empty-note">No buyer accounts yet.</div>';
       } catch (e) {
         list.innerHTML = `<div class="empty-note">${esc(e.message)}</div>`;
       }

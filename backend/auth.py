@@ -139,13 +139,16 @@ async def get_current_user(request: Request) -> dict:
         )
 
     user = await database.fetch_one(
-        query="SELECT id, email, role, wallet_address, created_at FROM users WHERE id = :id",
+        query="""SELECT id, email, role, wallet_address, created_at
+                 FROM users WHERE id = :id AND deleted_at IS NULL""",
         values={"id": user_id},
     )
     if not user:
+        # Covers both a deleted row and a closed account whose tokens are still
+        # within their expiry window.
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User no longer exists",
+            detail="This account is no longer active",
         )
 
     return dict(user)

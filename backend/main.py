@@ -122,6 +122,7 @@ for _route, _file in {
     "/app/history": "app-history.html",
     "/admin": "admin.html",
     "/marketplace": "marketplace.html",
+    "/profile": "profile.html",
 }.items():
     app.get(_route, include_in_schema=False)(_page(_file))
 

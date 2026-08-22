@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CTN — Account</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f5f2eb; --bg2: #eceadf; --card: #ffffff;
+      --border: rgba(0,0,0,0.1); --border2: rgba(0,0,0,0.06);
+      --text: #1a1a16; --text2: #6b6b5e; --text3: #9e9e8f;
+      --green: #2d6a4f; --green-light: #d8f3dc; --green-mid: #52b788;
+      --amber: #b5451b; --amber-light: #fde8d8;
+      --red: #b91c1c; --red-light: #fee2e2;
+      --mono: 'DM Mono', monospace; --serif: 'Fraunces', serif;
+      --radius: 12px; --radius-sm: 8px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: var(--mono); background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.6; }
+    nav { display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.5rem; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 100; }
+    .nav-left { display: flex; align-items: center; gap: 16px; }
+    .nav-logo { font-family: var(--serif); font-size: 1.15rem; font-weight: 500; display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--text); }
+    .nav-logo-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green-mid); }
+    .nav-link { font-size: 12px; color: var(--text2); text-decoration: none; }
+    .nav-link:hover { color: var(--text); }
+    .btn-sm { font-size: 11px; padding: 0.35rem 0.75rem; border-radius: var(--radius-sm); font-family: var(--mono); cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text2); }
+    .main { max-width: 680px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+    .page-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text3); margin-bottom: 0.35rem; }
+    h1 { font-family: var(--serif); font-size: clamp(1.5rem, 3vw, 2.1rem); font-weight: 300; margin-bottom: 1.5rem; }
+    .card { background: var(--card); border: 1px solid var(--border2); border-radius: var(--radius); padding: 1.35rem; margin-bottom: 1rem; }
+    .card.danger { border-color: rgba(185,28,28,0.25); }
+    .card-title { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text3); margin-bottom: 0.75rem; }
+    .card-title.danger { color: var(--red); }
+    .help { font-size: 12px; color: var(--text2); line-height: 1.6; margin-bottom: 0.9rem; }
+    .row { display: flex; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid var(--border2); font-size: 13px; gap: 12px; }
+    .row:last-child { border-bottom: none; }
+    .row-label { color: var(--text2); }
+    .row-value { text-align: right; word-break: break-all; }
+    label { display: block; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); margin: 0.75rem 0 0.35rem; }
+    input { width: 100%; padding: 0.6rem 0.8rem; border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: var(--mono); font-size: 13px; background: var(--bg); color: var(--text); }
+    input:focus { outline: none; border-color: var(--green-mid); }
+    .btn { padding: 0.6rem 1rem; border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; font-weight: 500; cursor: pointer; border: none; background: var(--text); color: var(--bg); margin-top: 0.9rem; }
+    .btn:hover { opacity: 0.85; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-danger { background: var(--red); color: #fff; }
+    .msg { font-size: 12px; margin-top: 0.7rem; line-height: 1.5; }
+    .msg.ok { color: var(--green); }
+    .msg.err { color: var(--red); }
+    .blocker { background: var(--amber-light); color: var(--amber); border-radius: var(--radius-sm); padding: 0.6rem 0.8rem; font-size: 11px; line-height: 1.5; margin-bottom: 0.8rem; }
+    .badge { font-size: 9px; padding: 2px 8px; border-radius: 20px; text-transform: uppercase; background: var(--green-light); color: var(--green); }
+    footer { border-top: 1px solid var(--border); padding: 1rem 1.5rem; font-size: 10px; color: var(--text3); text-align: center; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-left">
+      <a href="/" class="nav-logo"><div class="nav-logo-dot"></div> CTN</a>
+      <a href="#" class="nav-link" id="dashboard-link">Dashboard</a>
+    </div>
+    <div class="nav-left">
+      <span class="nav-link" id="nav-user">—</span>
+      <button class="btn-sm" onclick="CTN.logout('/')">Sign out</button>
+    </div>
+  </nav>
+
+  <div class="main">
+    <p class="page-label">Account</p>
+    <h1>Your <em>profile.</em></h1>
+
+    <div class="card">
+      <div class="card-title">Details</div>
+      <div id="details"><div class="help">Loading…</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Transfer this account</div>
+      <p class="help">
+        Changing the email address transfers control of this account, along with
+        everything it owns, to whoever holds that address. Your password confirms
+        the change.
+      </p>
+      <label for="new-email">New email address</label>
+      <input type="email" id="new-email" placeholder="new@example.com" autocomplete="email">
+      <label for="email-password">Current password</label>
+      <input type="password" id="email-password" placeholder="••••••••" autocomplete="current-password">
+      <button class="btn" onclick="changeEmail()" id="email-btn">Transfer account →</button>
+      <div class="msg" id="email-msg"></div>
+    </div>
+
+    <div class="card danger">
+      <div class="card-title danger">Close this account</div>
+      <div id="delete-blockers"></div>
+      <p class="help">
+        This removes your email and wallet from CTN and signs you out permanently.
+        Credits and transactions stay on the ledger without your details attached —
+        they are what makes the carbon offsets verifiable, so they cannot be erased.
+        This cannot be undone.
+      </p>
+      <label for="delete-password">Current password</label>
+      <input type="password" id="delete-password" placeholder="••••••••" autocomplete="current-password">
+      <label for="delete-confirm">Type DELETE to confirm</label>
+      <input type="text" id="delete-confirm" placeholder="DELETE" autocomplete="off">
+      <button class="btn btn-danger" onclick="deleteAccount()" id="delete-btn">Close account permanently</button>
+      <div class="msg" id="delete-msg"></div>
+    </div>
+  </div>
+
+  <footer>CTN · Climate Trust Network</footer>
+
+  <script src="/static/ctn.js"></script>
+  <script>
+    const esc = CTN.fmt.escape;
+    let profile = null;
+
+    async function init() {
+      const user = await CTN.requireRole(null, '/profile');
+      if (!user) return;
+
+      document.getElementById('nav-user').textContent = user.email;
+      document.getElementById('dashboard-link').href = CTN.homeFor(user.role);
+
+      await loadProfile();
+    }
+
+    async function loadProfile() {
+      try {
+        profile = await CTN.get('/api/auth/profile');
+      } catch (e) {
+        document.getElementById('details').innerHTML =
+          `<div class="msg err">${esc(e.message)}</div>`;
+        return;
+      }
+
+      const u = profile.user;
+      document.getElementById('details').innerHTML = `
+        <div class="row"><span class="row-label">Email</span><span class="row-value">${esc(u.email)}</span></div>
+        <div class="row"><span class="row-label">Role</span><span class="row-value"><span class="badge">${esc(u.role)}</span></span></div>
+        <div class="row"><span class="row-label">Wallet</span><span class="row-value">${u.wallet_address ? esc(u.wallet_address) : 'Not linked'}</span></div>
+        <div class="row"><span class="row-label">Member since</span><span class="row-value">${CTN.fmt.timestamp(u.created_at)}</span></div>`;
+
+      // Anything mid-transaction blocks closure; say so before they try.
+      const blockers = document.getElementById('delete-blockers');
+      const button = document.getElementById('delete-btn');
+      if (profile.can_delete) {
+        blockers.innerHTML = '';
+        button.disabled = false;
+      } else {
+        blockers.innerHTML = profile.delete_blockers
+          .map(b => `<div class="blocker">${esc(b)}</div>`).join('');
+        button.disabled = true;
+      }
+    }
+
+    function setMsg(id, text, ok) {
+      const el = document.getElementById(id);
+      el.textContent = text;
+      el.className = 'msg ' + (ok ? 'ok' : 'err');
+    }
+
+    async function changeEmail() {
+      const button = document.getElementById('email-btn');
+      const email = document.getElementById('new-email').value.trim();
+      const password = document.getElementById('email-password').value;
+
+      if (!email || !password) {
+        setMsg('email-msg', 'Enter the new address and your current password.', false);
+        return;
+      }
+
+      button.disabled = true;
+      try {
+        const result = await CTN.post('/api/auth/change-email', { email, password });
+        // The session token carries the address, so replace the stored copy.
+        if (result.token) CTN.setToken(result.token);
+        setMsg('email-msg', result.message, true);
+        document.getElementById('email-password').value = '';
+        document.getElementById('new-email').value = '';
+        document.getElementById('nav-user').textContent = result.email;
+        await loadProfile();
+      } catch (e) {
+        setMsg('email-msg', e.message, false);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function deleteAccount() {
+      const password = document.getElementById('delete-password').value;
+      const confirm = document.getElementById('delete-confirm').value;
+
+      if (!password || !confirm) {
+        setMsg('delete-msg', 'Enter your password and type DELETE to confirm.', false);
+        return;
+      }
+      if (!window.confirm('Close this account permanently? This cannot be undone.')) return;
+
+      const button = document.getElementById('delete-btn');
+      button.disabled = true;
+      try {
+        const result = await CTN.post('/api/auth/delete-account', { password, confirm });
+        CTN.setToken(null);
+        setMsg('delete-msg', result.message + ' Redirecting…', true);
+        setTimeout(() => { window.location.href = '/'; }, 2500);
+      } catch (e) {
+        setMsg('delete-msg', e.message, false);
+        button.disabled = false;
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

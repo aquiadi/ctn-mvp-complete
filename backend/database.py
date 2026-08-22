@@ -205,6 +205,12 @@ CREATE INDEX IF NOT EXISTS idx_transactions_buyer ON marketplace_transactions(bu
 # Columns added after the initial release. SQLite has no "ADD COLUMN IF NOT
 # EXISTS", so existing databases are upgraded by inspecting the table first.
 MIGRATIONS = {
+    "users": {
+        # Set when an account is closed. The row is kept and anonymised rather
+        # than deleted, because credits, transactions, and audit entries
+        # reference it and the ledger has to stay readable.
+        "deleted_at": "REAL",
+    },
     "credits": {
         "on_chain_id": "INTEGER",
         "ipfs_hash": "TEXT",
@@ -474,7 +480,8 @@ async def process_raw_readings(
 async def _seed_user(email: str, password: str, role: str, wallet_address: str = None) -> int:
     """Create the account if absent. Returns its id either way."""
     existing = await database.fetch_one(
-        query="SELECT id FROM users WHERE email = :email", values={"email": email}
+        query="SELECT id FROM users WHERE email = :email AND deleted_at IS NULL",
+        values={"email": email},
     )
     if existing:
         return existing["id"]

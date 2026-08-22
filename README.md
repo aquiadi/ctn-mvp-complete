@@ -20,6 +20,7 @@ frontend/                     Static pages, no build step
   static/wallet.js            EIP-1193 wallet linking
   index.html                  Public landing page and credit verification
   login.html  app.html  app-history.html  marketplace.html  admin.html
+  profile.html                Account details, email transfer, closure
 
 backend/
   config.py                   Every tunable value, read from the environment
@@ -148,9 +149,10 @@ front instead of failing at the point of use.
 cd backend && ../.venv/bin/python -m pytest
 ```
 
-96 tests covering authentication and role enforcement, wallet-signature
+113 tests covering authentication and role enforcement, wallet-signature
 verification, credit issuance and idempotency, marketplace concurrency, device
-onboarding and approval, CSV validation, and the audit trail. They run against a temporary database and need
+onboarding and approval, account transfer and closure, CSV validation, and the
+audit trail. They run against a temporary database and need
 no network access.
 
 Several are regression tests for specific defects, including two buyers
@@ -231,6 +233,27 @@ It lives at the root rather than in `backend/` on purpose. Railway's service
 root is `backend/`, and a Dockerfile there takes precedence over the Nixpacks
 builder — Railway would then build with `backend/` as the context and the
 `COPY backend/...` paths would not resolve.
+
+---
+
+## Accounts
+
+Every role has a profile page at `/profile`.
+
+**Transferring an account.** Changing the email address moves control of the
+account and everything it owns to whoever holds that address. The current
+password is required, so a borrowed session cannot quietly take it over.
+
+**Closing an account.** Requires the password and a typed confirmation. The user
+row is retained and anonymised rather than deleted — the email and wallet are
+cleared and the login disabled, but the row itself stays because credits,
+marketplace transactions, and audit entries reference it, and removing it would
+break the trail that makes those credits verifiable. The freed email address can
+be registered again.
+
+Closure is refused while anything is mid-transaction: an installer with credits
+listed or reserved, a buyer holding a reservation, or the last remaining
+administrator.
 
 ---
 
