@@ -1,4 +1,4 @@
-# CTN — Carbon Token Network
+# CTN — Climate Trust Network
 
 [![CI](https://github.com/aquiadi/ctn-mvp-complete/actions/workflows/ci.yml/badge.svg)](https://github.com/aquiadi/ctn-mvp-complete/actions/workflows/ci.yml)
 
@@ -245,6 +245,56 @@ quietly equated with a signed reading.
 contract's recorded quantities against the database, reporting whether the two
 ledgers agree — a direct lookup, not a scan.
 
+```mermaid
+flowchart LR
+    subgraph SRC["1 · Measure"]
+        S1["Device signs<br>CTN-READING-V1"]
+        S2["Spreadsheet export<br>uploaded by the seller"]
+    end
+
+    subgraph ING["2 · Ingest"]
+        V["attestation.py<br>recover signer<br>reject forged · tampered · replayed"]
+        P["csv_schema.py + data_utils.py<br>interpret, preview, confirm"]
+        F["fingerprint per device and timestamp<br>re-ingesting changes nothing"]
+    end
+
+    subgraph ACC["3 · Accumulate"]
+        A["sum unconsumed readings per device<br>remainder carries forward"]
+        T{"1,000 kg CO2<br>reached?"}
+    end
+
+    subgraph ISSUE["4 · Issue and certify"]
+        G{"installation<br>confirmed by an<br>operator?"}
+        CP["status: pending<br>cannot be listed"]
+        CV["status: verified"]
+        CERT["certificate pinned to IPFS"]
+    end
+
+    subgraph CHAIN["5 · Chain and market"]
+        M["admin mints<br>on_chain_id · tx_hash · CID recorded"]
+        L["installer lists it"]
+        RSV["buyer reserves<br>expires after 15 min"]
+        SOLD["purchase recorded<br>payment simulated"]
+        RET["admin retires on-chain<br>offset complete"]
+    end
+
+    VER["/verify/{credit_id}<br>contract record vs database"]
+
+    S1 -- "POST /api/v1/readings" --> V
+    S2 -- "POST /api/installer/upload-readings" --> P
+    V -- "attested" --> F
+    P -- "imported" --> F
+    F --> A --> T
+    T -- "no" --> A
+    T -- "yes" --> G
+    G -- "no" --> CP
+    G -- "yes" --> CV
+    CP -- "operator confirms, credits released" --> CV
+    CV --> CERT --> M --> L --> RSV --> SOLD --> RET
+    M -.-> VER
+    RET -.-> VER
+```
+
 ---
 
 ## Running locally
@@ -276,6 +326,96 @@ default. Two capabilities degrade rather than fail when unconfigured:
 ---
 
 ## Architecture
+
+```mermaid
+flowchart TB
+    subgraph CLIENTS["Clients"]
+        direction LR
+        DEV["ESP32 sensor<br>firmware/ctn_sensor<br>secp256k1 key never leaves it"]
+        SIM["tools/sensor_sim.py<br>reference client"]
+        WEB["Browser"]
+        WAL["EIP-1193 wallet"]
+    end
+
+    subgraph FE["Frontend — Vercel · static, no build step"]
+        direction LR
+        PAGES["index · login · app · app-history<br>marketplace · admin · profile"]
+        CTNJS["static/ctn.js<br>API base · session · fetch · formatting"]
+        WALJS["static/wallet.js<br>nonce signing"]
+    end
+
+    subgraph API["Backend — FastAPI on Railway"]
+        direction TB
+        EDGE["CORS allow-list · slowapi rate limits<br>JWT cookie with bearer fallback"]
+
+        subgraph ROUTERS["Routers"]
+            direction LR
+            R_AUTH["/api/auth<br>signup · login · profile · wallet"]
+            R_ING["/api/v1<br>enroll · readings · proof · spec"]
+            R_INS["/api/installer<br>dashboard · devices · upload · sell"]
+            R_MKT["/api/marketplace<br>listings · reserve · purchase"]
+            R_ADM["/api/admin<br>approve · ingest · audit · health"]
+            R_PUB["main.py public<br>/config /stats /credits /verify"]
+        end
+
+        subgraph CORE["Domain logic"]
+            direction LR
+            ATT["attestation.py<br>canonical message · EIP-191 recover"]
+            IMPORT["csv_schema.py · data_utils.py<br>column detection · cumulative to delta"]
+            AUTHM["auth.py<br>JWT · bcrypt · role dependencies"]
+            CFG["config.py<br>every tunable value"]
+        end
+
+        DBL["database.py<br>schema · fingerprinted ingest<br>accumulate to 1 tonne · issue credit"]
+        CHAINL["chain.py<br>web3.py on a worker thread"]
+        IPFSL["ipfs_utils.py<br>certificate pinning"]
+        SWEEP["release_stale_reservations<br>background task"]
+    end
+
+    subgraph STATE["State"]
+        direction LR
+        SQL[("SQLite on a mounted volume<br>users · devices · generation_readings<br>credits · transactions · audit_log")]
+        PIN["IPFS via Pinata<br>credit certificates"]
+        CHAINN["Polygon Amoy<br>CarbonCredit.sol"]
+    end
+
+    DEV -- "signed readings over HTTPS" --> EDGE
+    SIM -- "pair · sign · submit · verify" --> EDGE
+    WEB --> PAGES
+    WAL <-- "sign nonce" --> WALJS
+    PAGES --> CTNJS
+    PAGES --> WALJS
+    WALJS --> CTNJS
+    CTNJS -- "HTTPS · session cookie or bearer" --> EDGE
+
+    EDGE --> ROUTERS
+    R_ING --> ATT
+    R_INS -- "spreadsheet upload" --> IMPORT
+    R_ADM -- "CSV ingest" --> IMPORT
+    R_AUTH --> AUTHM
+    ATT --> DBL
+    IMPORT --> DBL
+    R_INS --> DBL
+    R_MKT --> DBL
+    R_ADM --> DBL
+    R_PUB --> DBL
+    R_ADM -- "mint · retire" --> CHAINL
+    R_PUB -- "verify" --> CHAINL
+    CFG -. "published at /config" .-> CTNJS
+
+    DBL --> SQL
+    DBL -- "certificate per credit" --> IPFSL
+    IPFSL --> PIN
+    CHAINL --> CHAINN
+    SWEEP -- "expire reservations" --> SQL
+```
+
+Sensors are the only clients that talk to the API without a session: a reading
+carries its own signature, so there is nothing to log in with and nothing to
+expire. Everything else — pages, wallet linking, admin actions — goes through
+the same JWT the browser holds.
+
+### Where the code lives
 
 ```
 frontend/                     Static pages, no build step
