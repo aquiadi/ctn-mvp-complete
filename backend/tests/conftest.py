@@ -37,6 +37,10 @@ os.environ.update(
         "ENROLL_RATE_LIMIT": "10000/minute",
         "PINATA_API_KEY": "",
         "PINATA_SECRET": "",
+        # Functional tests issue whole credits from a handful of readings a
+        # second apart, which only a utility-scale plant could produce. The
+        # plausibility tests declare realistic capacities explicitly.
+        "DEFAULT_RATED_CAPACITY_KW": "1000000",
     }
 )
 

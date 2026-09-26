@@ -16,6 +16,7 @@ import config
 from auth import require_installer
 import csv_schema
 from database import database, db_execute_with_retry, process_raw_readings
+from routes.site import SiteSpec
 
 router = APIRouter(prefix="/api/installer", tags=["installer"])
 
@@ -26,7 +27,7 @@ class SellRequest(BaseModel):
     credit_ids: List[int] = Field(..., min_length=1, max_length=1000)
 
 
-class DeviceRequestSubmission(BaseModel):
+class DeviceRequestSubmission(SiteSpec):
     """An installer asking for a generation device to be added to the platform."""
 
     device_id: str = Field(..., min_length=3, max_length=64)
@@ -60,7 +61,7 @@ class DeviceRequestSubmission(BaseModel):
         return value
 
 
-class ManualDeviceRequest(BaseModel):
+class ManualDeviceRequest(SiteSpec):
     """A device whose readings will be uploaded rather than signed."""
 
     device_id: str = Field(..., min_length=3, max_length=64)
@@ -81,7 +82,7 @@ class ManualDeviceRequest(BaseModel):
         return value
 
 
-class EnrollmentCodeRequest(BaseModel):
+class EnrollmentCodeRequest(SiteSpec):
     """A seller asking for a pairing code to flash into a new device."""
 
     label: str = Field(default="", max_length=64)
@@ -316,12 +317,15 @@ async def submit_device_request(
 
     request_id = await db_execute_with_retry(
         query="""INSERT INTO device_requests
-                 (device_id, requested_by, location, public_key, notes)
-                 VALUES (:device_id, :requested_by, :location, :public_key, :notes)""",
+                 (device_id, requested_by, location, public_key, notes,
+                  rated_capacity_kw, latitude, longitude)
+                 VALUES (:device_id, :requested_by, :location, :public_key, :notes,
+                         :capacity, :latitude, :longitude)""",
         values={
             "device_id": req.device_id,
             "requested_by": user["id"],
             "location": req.location or "India",
+            **req.site_values(),
             "public_key": req.public_key or None,
             "notes": req.notes or None,
         },
@@ -369,13 +373,16 @@ async def create_enrollment_code(
 
     await db_execute_with_retry(
         query="""INSERT INTO device_enrollments
-                 (code, owner_user_id, label, location, expires_at)
-                 VALUES (:code, :owner_id, :label, :location, :expires_at)""",
+                 (code, owner_user_id, label, location, expires_at,
+                  rated_capacity_kw, latitude, longitude)
+                 VALUES (:code, :owner_id, :label, :location, :expires_at,
+                         :capacity, :latitude, :longitude)""",
         values={
             "code": code,
             "owner_id": user["id"],
             "label": req.label or None,
             "location": req.location or "India",
+            **req.site_values(),
             "expires_at": expires_at,
         },
     )
@@ -441,12 +448,16 @@ async def add_manual_device(
         )
 
     await db_execute_with_retry(
-        query="""INSERT INTO devices (device_id, owner_user_id, location, enrolled_via)
-                 VALUES (:device_id, :owner_id, :location, 'manual')""",
+        query="""INSERT INTO devices
+                     (device_id, owner_user_id, location, enrolled_via,
+                      rated_capacity_kw, latitude, longitude)
+                 VALUES (:device_id, :owner_id, :location, 'manual',
+                         :capacity, :latitude, :longitude)""",
         values={
             "device_id": req.device_id,
             "owner_id": user["id"],
             "location": req.location or "India",
+            **req.site_values(),
         },
     )
 

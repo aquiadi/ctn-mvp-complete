@@ -5,6 +5,7 @@ Every administrative action is recorded in `audit_log` with the acting admin,
 a timestamp, and a stated reason.
 """
 
+import json
 import time
 from typing import Optional
 
@@ -16,6 +17,7 @@ import config
 from auth import require_admin
 from data_utils import CsvError, parse_reading_csv
 from database import database, db_execute_with_retry, process_raw_readings
+from routes.site import SiteSpec
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -32,7 +34,7 @@ class DeviceReview(BaseModel):
         return value.strip()
 
 
-class DeviceRegistration(BaseModel):
+class DeviceRegistration(SiteSpec):
     device_id: str = Field(..., min_length=1, max_length=64)
     owner_email: str
     location: str = Field(default="India", max_length=120)
@@ -277,6 +279,8 @@ async def list_devices(admin: dict = Depends(require_admin)):
     devices = await database.fetch_all(
         """SELECT d.device_id, d.location, d.created_at,
                   d.public_key, d.last_sequence, d.verified, d.enrolled_via,
+                  d.rated_capacity_kw, d.latitude, d.longitude, d.last_reading_at,
+                  d.last_meter_wh, d.tamper_count,
                   u.email AS owner_email,
                   (SELECT COUNT(*) FROM generation_readings r
                    WHERE r.device_id = d.device_id) AS reading_count,
@@ -312,13 +316,17 @@ async def register_device(req: DeviceRegistration, admin: dict = Depends(require
         raise HTTPException(409, f"Device '{req.device_id}' is already registered.")
 
     await db_execute_with_retry(
-        query="""INSERT INTO devices (device_id, owner_user_id, location, public_key)
-                 VALUES (:device_id, :owner_id, :location, :public_key)""",
+        query="""INSERT INTO devices
+                     (device_id, owner_user_id, location, public_key,
+                      rated_capacity_kw, latitude, longitude)
+                 VALUES (:device_id, :owner_id, :location, :public_key,
+                         :capacity, :latitude, :longitude)""",
         values={
             "device_id": req.device_id,
             "owner_id": owner["id"],
             "location": req.location,
             "public_key": req.public_key or None,
+            **req.site_values(),
         },
     )
     await log_admin_action(
@@ -405,13 +413,19 @@ async def approve_device_request(
 
     async with database.transaction():
         await database.execute(
-            query="""INSERT INTO devices (device_id, owner_user_id, location, public_key)
-                     VALUES (:device_id, :owner_id, :location, :public_key)""",
+            query="""INSERT INTO devices
+                         (device_id, owner_user_id, location, public_key,
+                          rated_capacity_kw, latitude, longitude)
+                     VALUES (:device_id, :owner_id, :location, :public_key,
+                             :capacity, :latitude, :longitude)""",
             values={
                 "device_id": record["device_id"],
                 "owner_id": record["requested_by"],
                 "location": record["location"] or "India",
                 "public_key": record.get("public_key"),
+                "capacity": record.get("rated_capacity_kw"),
+                "latitude": record.get("latitude"),
+                "longitude": record.get("longitude"),
             },
         )
         await database.execute(
@@ -513,13 +527,13 @@ async def verify_device(
         )
         promoted = await database.fetch_all(
             query="""SELECT id FROM credits
-                     WHERE device_id = :id AND status = 'pending'""",
+                     WHERE device_id = :id AND status = 'pending' AND review_hold IS NULL""",
             values={"id": device_id},
         )
         if promoted:
             await database.execute(
                 query="""UPDATE credits SET status = 'verified'
-                         WHERE device_id = :id AND status = 'pending'""",
+                         WHERE device_id = :id AND status = 'pending' AND review_hold IS NULL""",
                 values={"id": device_id},
             )
 
@@ -534,6 +548,109 @@ async def verify_device(
         "credits_released": len(promoted),
         "message": f"{device_id} verified; {len(promoted)} credit(s) are now sellable.",
     }
+
+
+# ── Review holds and device events ────────────────────────────────────────
+
+@router.get("/review-queue")
+async def review_queue(admin: dict = Depends(require_admin)):
+    """
+    Credits held because screening flagged a contributing reading.
+
+    Each entry carries the flags themselves, so the reviewer sees what was
+    measured and which threshold it crossed, not an opaque score.
+    """
+    held = await database.fetch_all(
+        """SELECT c.credit_id, c.device_id, c.review_hold, c.period_start, c.period_end,
+                  c.total_kwh, d.verified AS device_verified
+           FROM credits c LEFT JOIN devices d ON d.device_id = c.device_id
+           WHERE c.review_hold IS NOT NULL
+           ORDER BY c.credit_id"""
+    )
+
+    queue = []
+    for credit in held:
+        flagged = await database.fetch_all(
+            query="""SELECT r.reading_id, r.timestamp, r.total_kwh, r.anomaly_flags
+                     FROM credit_allocations a
+                     JOIN credits c ON c.id = a.credit_row_id
+                     JOIN generation_readings r ON r.id = a.reading_row_id
+                     WHERE c.credit_id = :credit_id AND r.anomaly_flags IS NOT NULL""",
+            values={"credit_id": credit["credit_id"]},
+        )
+        queue.append({
+            **dict(credit),
+            "flagged_readings": [
+                {**dict(r), "anomaly_flags": json.loads(r["anomaly_flags"])} for r in flagged
+            ],
+        })
+    return {"credits": queue, "total": len(queue)}
+
+
+@router.post("/credits/{credit_id}/release")
+async def release_held_credit(
+    credit_id: int, req: DeviceReview, admin: dict = Depends(require_admin)
+):
+    """
+    Clear a review hold after a person has looked at the flagged readings.
+
+    The credit becomes sellable only if its device's installation is also
+    confirmed; otherwise it stays pending and is released with the device.
+    """
+    if len(req.note) < 5:
+        raise HTTPException(400, "Record what was checked (at least 5 characters).")
+
+    credit = await database.fetch_one(
+        query="""SELECT c.credit_id, c.status, c.review_hold, c.device_id,
+                        d.verified AS device_verified
+                 FROM credits c LEFT JOIN devices d ON d.device_id = c.device_id
+                 WHERE c.credit_id = :credit_id""",
+        values={"credit_id": credit_id},
+    )
+    if not credit:
+        raise HTTPException(404, f"Credit #{credit_id} not found")
+    if not credit["review_hold"]:
+        raise HTTPException(409, f"Credit #{credit_id} is not held for review.")
+
+    sellable = bool(credit["device_verified"]) or config.TRUST_SELF_ENROLLED_DEVICES
+    new_status = "verified" if sellable and credit["status"] == "pending" else credit["status"]
+
+    await log_admin_action(
+        admin["id"], "release_credit", "credit", str(credit_id), req.note,
+        f"hold cleared: {credit['review_hold']}",
+    )
+    await db_execute_with_retry(
+        query="""UPDATE credits SET review_hold = NULL, status = :status
+                 WHERE credit_id = :credit_id""",
+        values={"status": new_status, "credit_id": credit_id},
+    )
+
+    return {
+        "status": new_status,
+        "credit_id": credit_id,
+        "message": (
+            f"Credit #{credit_id} released for sale." if new_status == "verified"
+            else f"Hold cleared on credit #{credit_id}; it is released when "
+                 f"{credit['device_id']} is confirmed."
+        ),
+    }
+
+
+@router.get("/device-events")
+async def device_events(
+    device_id: Optional[str] = None, limit: int = 100, admin: dict = Depends(require_admin)
+):
+    """Tamper and other trust-changing events reported by devices, newest first."""
+    where = "WHERE device_id = :device_id" if device_id else ""
+    values = {"limit": max(1, min(limit, 500))}
+    if device_id:
+        values["device_id"] = device_id
+    rows = await database.fetch_all(
+        query=f"""SELECT device_id, kind, detail, created_at FROM device_events
+                  {where} ORDER BY id DESC LIMIT :limit""",
+        values=values,
+    )
+    return {"events": [dict(r) for r in rows]}
 
 
 # ── CSV ingestion ──────────────────────────────────────────────────────────

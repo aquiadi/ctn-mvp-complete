@@ -42,14 +42,82 @@ IS_PRODUCTION = ENVIRONMENT == "production"
 
 # ── Carbon accounting ──────────────────────────────────────────────────────
 
-# Central Electricity Authority grid emission factor for India.
+# Grid emission factor used to convert exported solar energy into avoided CO2.
+# The factor is a versioned methodology parameter, not a constant of nature:
+# CEA republishes its baseline database every year, and a calculation is only
+# auditable if the factor's source and vintage travel with it. The default is
+# the CEA v19 weighted average (0.817 t/MWh, FY2022-23) rounded to two places.
 EMISSION_FACTOR_KG_PER_KWH = _float("EMISSION_FACTOR", 0.82)
-METHODOLOGY = f"CEA Grid Emission Factor {EMISSION_FACTOR_KG_PER_KWH} kg CO2/kWh"
+EMISSION_FACTOR_SOURCE = os.getenv(
+    "EMISSION_FACTOR_SOURCE",
+    "CEA CO2 Baseline Database for the Indian Power Sector, v19.0",
+)
+EMISSION_FACTOR_VINTAGE = os.getenv("EMISSION_FACTOR_VINTAGE", "FY2022-23")
 STANDARD = os.getenv("CREDIT_STANDARD", "CTN-SOLAR-V1")
+METHODOLOGY = f"CEA Grid Emission Factor {EMISSION_FACTOR_KG_PER_KWH} kg CO2/kWh"
+
+
+def methodology_record() -> dict:
+    """The methodology parameters every certificate carries, in structured form."""
+    return {
+        "methodology_id": STANDARD,
+        "calculation": "co2_avoided_kg = energy_kwh * factor_value",
+        "factor_value": EMISSION_FACTOR_KG_PER_KWH,
+        "factor_unit": "kg CO2 / kWh",
+        "factor_source": EMISSION_FACTOR_SOURCE,
+        "factor_vintage": EMISSION_FACTOR_VINTAGE,
+    }
 
 # One credit represents one tonne of CO2 avoided. Readings accumulate until
 # this threshold is crossed, at which point a discrete credit is issued.
 KG_CO2_PER_CREDIT = _float("KG_CO2_PER_CREDIT", 1000.0)
+
+
+# ── Physical plausibility ──────────────────────────────────────────────────
+
+# A signature proves who produced a reading, not that it is physically possible.
+# These bounds reject readings no real installation could have produced.
+
+# How far ahead of server time a device clock may run. Matches the +/-300 s
+# window in the protocol description; NTP-disciplined clocks sit well inside it.
+MAX_CLOCK_SKEW_SECONDS = _int("MAX_CLOCK_SKEW_SECONDS", 300)
+
+# How old a reading may be when it arrives. Devices buffer through outages, so
+# this is a backfill window rather than a freshness requirement. Anything older
+# has to come in through the reviewed import path instead.
+MAX_READING_AGE_HOURS = _int("MAX_READING_AGE_HOURS", 72)
+
+# Nameplate AC capacity assumed for a device that did not declare one. Sized for
+# a large commercial rooftop so honest devices are never refused; declaring the
+# real capacity tightens the bound considerably.
+DEFAULT_RATED_CAPACITY_KW = _float("DEFAULT_RATED_CAPACITY_KW", 100.0)
+
+# Headroom over nameplate: metering class tolerance plus brief cloud-edge
+# over-irradiance. Anything past this is not a solar array.
+CAPACITY_TOLERANCE = _float("CAPACITY_TOLERANCE", 1.10)
+
+# Shortest interval the capacity bound is evaluated over. A device reporting
+# every few seconds would otherwise be held to an energy bound far tighter
+# than its meter's resolution.
+MIN_PLAUSIBILITY_INTERVAL_SECONDS = _int("MIN_PLAUSIBILITY_INTERVAL_SECONDS", 900)
+
+# A V2 reading carries the device's lifetime energy counter. The interval's
+# energy must equal the counter's advance to within one meter tick.
+METER_CONTINUITY_TOLERANCE_WH = _int("METER_CONTINUITY_TOLERANCE_WH", 1)
+
+
+# ── Anomaly screening ──────────────────────────────────────────────────────
+
+# Statistical screening runs beside the deterministic rules above. It never
+# rejects a reading — it holds the credit for a person to look at.
+ANOMALY_SCREENING = _bool("ANOMALY_SCREENING", True)
+ANOMALY_MIN_HISTORY = _int("ANOMALY_MIN_HISTORY", 96)          # one day at 15 min
+ANOMALY_HISTORY_WINDOW = _int("ANOMALY_HISTORY_WINDOW", 2880)  # thirty days
+ANOMALY_ROBUST_Z = _float("ANOMALY_ROBUST_Z", 6.0)
+ANOMALY_FLATLINE_RUN = _int("ANOMALY_FLATLINE_RUN", 12)
+# Sun this far below the horizon for the whole interval means generation is
+# impossible, allowing for refraction and timestamp rounding.
+ANOMALY_NIGHT_ELEVATION_DEG = _float("ANOMALY_NIGHT_ELEVATION_DEG", -2.0)
 
 
 # ── Pricing ────────────────────────────────────────────────────────────────
@@ -77,7 +145,20 @@ AMOY_RPC = os.getenv("AMOY_RPC", "https://polygon-amoy-bor-rpc.publicnode.com")
 EXPLORER = os.getenv("EXPLORER", "https://amoy.polygonscan.com")
 
 MINT_GAS_LIMIT = _int("MINT_GAS_LIMIT", 300_000)
-RETIRE_GAS_LIMIT = _int("RETIRE_GAS_LIMIT", 100_000)
+RETIRE_GAS_LIMIT = _int("RETIRE_GAS_LIMIT", 120_000)
+
+# 1 = the CarbonCredit contract deployed at CONTRACT_ADDRESS today.
+# 2 = CarbonCreditV2 (ERC-721, duplicate-certificate guard, retirement
+#     beneficiary). Set only after deploying V2 and pointing the address at it.
+CONTRACT_VERSION = _int("CONTRACT_VERSION", 1)
+
+# A mint claim older than this with no broadcast transaction is presumed dead
+# (process restarted before sending) and may be taken over. One that did
+# broadcast is never taken over automatically; see /mint.
+MINT_CLAIM_TTL_SECONDS = _int("MINT_CLAIM_TTL_SECONDS", 600)
+
+# Blocks to wait for a receipt before giving up on a transaction.
+TX_RECEIPT_TIMEOUT_SECONDS = _int("TX_RECEIPT_TIMEOUT_SECONDS", 180)
 
 # The contract stores energy and CO2 as integers. Values are multiplied by this
 # factor before being written on-chain so three decimal places survive.
@@ -94,7 +175,6 @@ if PRIVATE_KEY[:2].lower() == "0x":
 
 PINATA_API_KEY = os.getenv("PINATA_API_KEY")
 PINATA_SECRET = os.getenv("PINATA_SECRET")
-PINATA_PIN_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
 IPFS_GATEWAY = os.getenv("IPFS_GATEWAY", "https://gateway.pinata.cloud/ipfs")
 
 # Seed dataset of raw solar readings, loaded once at startup.
@@ -162,9 +242,24 @@ DEMO_DEVICE_LOCATION = os.getenv("DEMO_DEVICE_LOCATION", "Patna, Bihar, India")
 
 # Credits earned by the demo installer sit in platform custody, so the demo can
 # be minted end to end without a reviewer connecting a wallet. Real installers
-# link their own address by signing a challenge. Must be a valid address:
-# mintCredit checksums the recipient, so a placeholder string would revert.
-DEMO_INSTALLER_WALLET = os.getenv("DEMO_INSTALLER_WALLET", CONTRACT_ADDRESS)
+# link their own address by signing a challenge.
+#
+# Custody means the platform's own signing wallet. Earlier builds defaulted to
+# the contract address, which minted credits to a contract that can neither
+# hold nor move them. With no signing key there is no custody wallet, and the
+# demo account is simply left without one.
+def _custody_address() -> str | None:
+    if not PRIVATE_KEY:
+        return None
+    try:
+        from eth_account import Account
+
+        return Account.from_key(PRIVATE_KEY).address
+    except Exception:
+        return None
+
+
+DEMO_INSTALLER_WALLET = os.getenv("DEMO_INSTALLER_WALLET") or _custody_address()
 SEED_DEMO_DATA = _bool("SEED_DEMO_DATA", not IS_PRODUCTION)
 
 

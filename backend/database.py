@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 import aiosqlite
 from databases import Database
@@ -103,6 +103,17 @@ CREATE TABLE IF NOT EXISTS devices (
     verified_at REAL,
     verified_by INTEGER REFERENCES users(id),
     enrolled_via TEXT,
+    -- Nameplate AC capacity. Bounds how much energy an interval can claim.
+    rated_capacity_kw REAL,
+    -- Site coordinates, for the solar-geometry screen. Optional.
+    latitude REAL,
+    longitude REAL,
+    -- Timestamp and lifetime meter counter of the last accepted reading, the
+    -- baseline the next reading is checked against.
+    last_reading_at TEXT,
+    last_meter_wh INTEGER,
+    -- Enclosure-open events the device has reported. Only ever increases.
+    tamper_count INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 
@@ -125,7 +136,18 @@ CREATE TABLE IF NOT EXISTS generation_readings (
     device_signature TEXT,
     signed_message TEXT,
     sequence INTEGER,
+    message_version TEXT,
+    meter_wh INTEGER,
+    tamper_count INTEGER,
+    -- The factor co2_avoided_kg was computed with, frozen at ingestion so a
+    -- later methodology change cannot silently restate history.
+    emission_factor REAL,
+    -- JSON list of screening flags; NULL when nothing stood out.
+    anomaly_flags TEXT,
     credit_id INTEGER REFERENCES credits(id),
+    -- A reading's CO2 can span two credits. allocated_kg is how much of it has
+    -- been assigned so far; consumed_by_credit_id is set once all of it has.
+    allocated_kg REAL NOT NULL DEFAULT 0,
     consumed_by_credit_id INTEGER REFERENCES credits(id),
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 );
@@ -158,6 +180,37 @@ CREATE TABLE IF NOT EXISTS credits (
     buyer_user_id INTEGER REFERENCES users(id),
     contract_version TEXT DEFAULT 'new'
         CHECK (contract_version IN ('old', 'new')),
+    -- The exact certificate document whose hash is ipfs_hash. Kept so the
+    -- same bytes are pinned whenever pinning happens, not a re-rendering.
+    certificate TEXT,
+    -- Why a credit is held for review despite its device being confirmed.
+    review_hold TEXT,
+    -- Mint claim: an opaque token taken atomically before broadcasting, so two
+    -- requests can never mint the same credit twice.
+    mint_claim TEXT,
+    mint_claimed_at REAL,
+    mint_tx_hash TEXT,
+    retirement_beneficiary TEXT,
+    retirement_purpose TEXT,
+    created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
+);
+
+-- Which part of which reading makes up each credit. Every credit's rows sum to
+-- exactly one credit's worth of CO2, so it can be recomputed from its evidence.
+CREATE TABLE IF NOT EXISTS credit_allocations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credit_row_id INTEGER NOT NULL REFERENCES credits(id),
+    reading_row_id INTEGER NOT NULL REFERENCES generation_readings(id),
+    kwh REAL NOT NULL,
+    kg REAL NOT NULL
+);
+
+-- Device-originated events that change trust: tamper, counter anomalies.
+CREATE TABLE IF NOT EXISTS device_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    detail TEXT,
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 
@@ -204,7 +257,10 @@ CREATE TABLE IF NOT EXISTS device_enrollments (
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now')),
     expires_at REAL NOT NULL,
     used_at REAL,
-    device_id TEXT
+    device_id TEXT,
+    rated_capacity_kw REAL,
+    latitude REAL,
+    longitude REAL
 );
 
 CREATE TABLE IF NOT EXISTS device_requests (
@@ -219,6 +275,9 @@ CREATE TABLE IF NOT EXISTS device_requests (
     reviewed_by INTEGER REFERENCES users(id),
     reviewed_at REAL,
     review_note TEXT,
+    rated_capacity_kw REAL,
+    latitude REAL,
+    longitude REAL,
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 """
@@ -241,6 +300,11 @@ CREATE INDEX IF NOT EXISTS idx_device_requests_status ON device_requests(status)
 CREATE INDEX IF NOT EXISTS idx_device_requests_user ON device_requests(requested_by);
 CREATE INDEX IF NOT EXISTS idx_audit_admin ON audit_log(admin_user_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_buyer ON marketplace_transactions(buyer_user_id);
+CREATE INDEX IF NOT EXISTS idx_readings_device_open
+    ON generation_readings(device_id, consumed_by_credit_id);
+CREATE INDEX IF NOT EXISTS idx_allocations_credit ON credit_allocations(credit_row_id);
+CREATE INDEX IF NOT EXISTS idx_allocations_reading ON credit_allocations(reading_row_id);
+CREATE INDEX IF NOT EXISTS idx_device_events_device ON device_events(device_id);
 """
 
 # Columns added after the initial release. SQLite has no "ADD COLUMN IF NOT
@@ -253,14 +317,34 @@ MIGRATIONS = {
         "verified_at": "REAL",
         "verified_by": "INTEGER",
         "enrolled_via": "TEXT",
+        "rated_capacity_kw": "REAL",
+        "latitude": "REAL",
+        "longitude": "REAL",
+        "last_reading_at": "TEXT",
+        "last_meter_wh": "INTEGER",
+        "tamper_count": "INTEGER NOT NULL DEFAULT 0",
     },
     "generation_readings": {
         "device_signature": "TEXT",
         "signed_message": "TEXT",
         "sequence": "INTEGER",
+        "message_version": "TEXT",
+        "meter_wh": "INTEGER",
+        "tamper_count": "INTEGER",
+        "emission_factor": "REAL",
+        "anomaly_flags": "TEXT",
+        "allocated_kg": "REAL NOT NULL DEFAULT 0",
     },
     "device_requests": {
         "public_key": "TEXT",
+        "rated_capacity_kw": "REAL",
+        "latitude": "REAL",
+        "longitude": "REAL",
+    },
+    "device_enrollments": {
+        "rated_capacity_kw": "REAL",
+        "latitude": "REAL",
+        "longitude": "REAL",
     },
     "users": {
         # Set when an account is closed. The row is kept and anonymised rather
@@ -275,8 +359,23 @@ MIGRATIONS = {
         "minted_at": "REAL",
         "retired_at": "REAL",
         "retire_tx_hash": "TEXT",
+        "certificate": "TEXT",
+        "review_hold": "TEXT",
+        "mint_claim": "TEXT",
+        "mint_claimed_at": "REAL",
+        "mint_tx_hash": "TEXT",
+        "retirement_beneficiary": "TEXT",
+        "retirement_purpose": "TEXT",
     },
 }
+
+# Data fixes that accompany the column migrations. Each is idempotent.
+DATA_MIGRATIONS = (
+    # Readings consumed under the old whole-reading model were fully assigned
+    # to their credit; record that in the allocation column.
+    """UPDATE generation_readings SET allocated_kg = co2_avoided_kg
+       WHERE consumed_by_credit_id IS NOT NULL AND allocated_kg = 0""",
+)
 
 
 # ── Retry helpers ──────────────────────────────────────────────────────────
@@ -330,12 +429,24 @@ async def _apply_schema():
                     await raw_db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
                     print(f"✓ Added column {table}.{column}")
 
+        for statement in DATA_MIGRATIONS:
+            await raw_db.execute(statement)
+
         # Only now that every column exists can the indexes reference them.
         await raw_db.executescript(INDEXES_SQL)
         await raw_db.commit()
 
 
 # ── Credit issuance ────────────────────────────────────────────────────────
+
+# CO2 is accounted in kilograms as floats. Anything below a microgram is
+# rounding residue, not carbon.
+_KG_EPSILON = 1e-6
+
+# The certificate schema version. Bumped whenever its shape changes, so an
+# auditor knows which fields to expect.
+CERTIFICATE_SCHEMA = "ctn-certificate/v2"
+
 
 def _reading_fingerprint(reading: dict) -> str:
     """
@@ -351,9 +462,14 @@ def _reading_fingerprint(reading: dict) -> str:
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
 
-def _sign_reading(reading: dict) -> str:
-    """Hash the canonical form of a reading so later tampering is detectable."""
-    return hashlib.sha256(json.dumps(reading, sort_keys=True).encode("utf-8")).hexdigest()
+def _content_hash(value: dict) -> str:
+    """SHA-256 of a document's canonical JSON form."""
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def canonical_json(value) -> str:
+    """One byte-exact serialisation, so a hash can be recomputed anywhere."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 async def _next_credit_id() -> int:
@@ -367,16 +483,27 @@ async def _next_credit_id() -> int:
     return (row["max_id"] if row else 0) + 1
 
 
-async def _insert_readings(readings: Iterable[dict], owner_user_id: int) -> int:
+async def _existing_fingerprints(fingerprints: list[str]) -> set[str]:
+    """Which of these reading ids are already stored. One indexed lookup per chunk."""
+    found: set[str] = set()
+    for start in range(0, len(fingerprints), 500):
+        chunk = fingerprints[start:start + 500]
+        placeholders = ", ".join(f":f{i}" for i in range(len(chunk)))
+        rows = await database.fetch_all(
+            query=f"SELECT reading_id FROM generation_readings WHERE reading_id IN ({placeholders})",
+            values={f"f{i}": value for i, value in enumerate(chunk)},
+        )
+        found.update(row["reading_id"] for row in rows)
+    return found
+
+
+async def _insert_readings(readings: list[dict], owner_user_id: int) -> int:
     """Insert readings that aren't already stored. Returns the number added."""
-    existing = {
-        row["reading_id"]
-        for row in await database.fetch_all("SELECT reading_id FROM generation_readings")
-    }
+    fingerprints = [_reading_fingerprint(r) for r in readings]
+    existing = await _existing_fingerprints(fingerprints)
 
     inserted = 0
-    for reading in readings:
-        fingerprint = _reading_fingerprint(reading)
+    for reading, fingerprint in zip(readings, fingerprints):
         if fingerprint in existing:
             continue
 
@@ -389,24 +516,38 @@ async def _insert_readings(readings: Iterable[dict], owner_user_id: int) -> int:
             "standard": config.STANDARD,
             "location": reading.get("location", "India"),
         }
+        flags = reading.get("anomaly_flags")
 
         await database.execute(
             query="""INSERT INTO generation_readings
                 (reading_id, device_id, owner_user_id, total_kwh, co2_avoided_kg,
                  timestamp, methodology, standard, location, signature,
-                 device_signature, signed_message, sequence)
+                 device_signature, signed_message, sequence, message_version,
+                 meter_wh, tamper_count, emission_factor, anomaly_flags)
                 VALUES (:reading_id, :device_id, :owner_user_id, :total_kwh, :co2_avoided_kg,
                         :timestamp, :methodology, :standard, :location, :signature,
-                        :device_signature, :signed_message, :sequence)""",
+                        :device_signature, :signed_message, :sequence, :message_version,
+                        :meter_wh, :tamper_count, :emission_factor, :anomaly_flags)""",
             values={
                 "reading_id": fingerprint,
                 "owner_user_id": reading.get("owner_user_id", owner_user_id),
-                "signature": _sign_reading(canonical),
+                # Server-side content hash: detects corruption at rest, proves
+                # nothing about origin.
+                "signature": hashlib.sha256(
+                    json.dumps(canonical, sort_keys=True).encode("utf-8")
+                ).hexdigest(),
                 # Present only for readings a device signed; CSV rows carry none,
                 # which is what distinguishes attested data from asserted data.
                 "device_signature": reading.get("device_signature"),
                 "signed_message": reading.get("signed_message"),
                 "sequence": reading.get("sequence"),
+                "message_version": reading.get("message_version"),
+                "meter_wh": reading.get("meter_wh"),
+                "tamper_count": reading.get("tamper_count"),
+                "emission_factor": reading.get(
+                    "emission_factor", config.EMISSION_FACTOR_KG_PER_KWH
+                ),
+                "anomaly_flags": json.dumps(flags) if flags else None,
                 **canonical,
             },
         )
@@ -416,7 +557,17 @@ async def _insert_readings(readings: Iterable[dict], owner_user_id: int) -> int:
     return inserted
 
 
-async def _device_is_verified(device_id: str) -> bool:
+async def _device_record(device_id: str) -> Optional[dict]:
+    row = await database.fetch_one(
+        query="""SELECT device_id, public_key, verified, latitude, longitude,
+                        rated_capacity_kw, location
+                 FROM devices WHERE device_id = :device_id""",
+        values={"device_id": device_id},
+    )
+    return dict(row) if row else None
+
+
+def _device_is_verified(device: Optional[dict]) -> bool:
     """
     Whether an operator has confirmed this device's installation.
 
@@ -427,77 +578,220 @@ async def _device_is_verified(device_id: str) -> bool:
     """
     if config.TRUST_SELF_ENROLLED_DEVICES:
         return True
+    return bool(device and device["verified"])
 
-    row = await database.fetch_one(
-        query="SELECT verified FROM devices WHERE device_id = :device_id",
-        values={"device_id": device_id},
-    )
-    return bool(row and row["verified"])
+
+def _evidence_entry(row: dict, kg: float, kwh: float) -> dict:
+    """
+    One reading's contribution to a certificate, with everything needed to
+    check it: the signed text and signature for attested readings, or an
+    explicit statement that the reading was imported and carries none.
+    """
+    entry = {
+        "reading_id": row["reading_id"],
+        "timestamp": row["timestamp"],
+        "reading_kwh": round(row["total_kwh"], 6),
+        "allocated_kwh": round(kwh, 6),
+        "allocated_kg": round(kg, 6),
+        "emission_factor": row["emission_factor"],
+    }
+    if row["device_signature"]:
+        entry["attestation"] = {
+            "message_version": row["message_version"] or "CTN-READING-V1",
+            "signed_message": row["signed_message"],
+            "device_signature": row["device_signature"],
+        }
+    else:
+        entry["attestation"] = None
+        entry["provenance"] = "imported"
+    if row["anomaly_flags"]:
+        entry["anomaly_flags"] = json.loads(row["anomaly_flags"])
+    return entry
+
+
+def build_certificate(
+    credit_id: int,
+    device: Optional[dict],
+    device_id: str,
+    owner_user_id: int,
+    bucket: list[tuple[dict, float, float]],
+    review_hold: Optional[str],
+) -> dict:
+    """
+    The evidence document for one credit.
+
+    Self-contained: a third party holding only this document can recover each
+    attested reading's signer, compare it with the device key recorded here,
+    and re-add the allocations to confirm they total one credit's worth of CO2
+    under the stated factor — without calling this API at all.
+    """
+    readings = [_evidence_entry(row, kg, kwh) for row, kg, kwh in bucket]
+    return {
+        "schema": CERTIFICATE_SCHEMA,
+        "credit_id": credit_id,
+        "co2_avoided_kg": config.KG_CO2_PER_CREDIT,
+        "energy_kwh": round(sum(kwh for _, _, kwh in bucket), 6),
+        "period_start": bucket[0][0]["timestamp"],
+        "period_end": bucket[-1][0]["timestamp"],
+        "methodology": config.methodology_record(),
+        "device": {
+            "device_id": device_id,
+            "public_key": device["public_key"] if device else None,
+            "installation_confirmed": _device_is_verified(device),
+            "location": device["location"] if device else None,
+            "latitude": device["latitude"] if device else None,
+            "longitude": device["longitude"] if device else None,
+            "rated_capacity_kw": device["rated_capacity_kw"] if device else None,
+        },
+        "owner_user_id": owner_user_id,
+        "readings_attested": sum(1 for r in readings if r["attestation"]),
+        "readings_imported": sum(1 for r in readings if not r["attestation"]),
+        "review_hold": review_hold,
+        "verification": (
+            "For each reading with an attestation, recover the EIP-191 signer of "
+            "signed_message from device_signature and compare it to device.public_key. "
+            "Sum allocated_kg across readings; it equals co2_avoided_kg."
+        ),
+        "readings": readings,
+    }
 
 
 async def _issue_credit(
     device_id: str,
     owner_user_id: int,
-    total_kwh: float,
-    period_start: str,
-    period_end: str,
-    location: str,
-    contributing: list[dict],
+    device: Optional[dict],
+    bucket: list[tuple[dict, float, float]],
 ) -> int:
-    """Create one discrete credit and mark its contributing readings consumed."""
-    from ipfs_utils import upload_credit_to_ipfs
+    """
+    Create one credit from a full bucket of allocations and record them.
 
+    A credit is held as pending when its device is unconfirmed, or when any
+    contributing reading was flagged by screening. The latter is recorded as a
+    review hold so confirming the device does not release it unseen.
+    """
     credit_id = await _next_credit_id()
-    status = "verified" if await _device_is_verified(device_id) else "pending"
-    certificate = {
-        "credit_id": credit_id,
-        "device_verified": status == "verified",
-        "device_id": device_id,
-        "owner_user_id": owner_user_id,
-        "total_kwh": total_kwh,
-        "co2_avoided_kg": config.KG_CO2_PER_CREDIT,
-        "period_start": period_start,
-        "period_end": period_end,
-        "methodology": config.METHODOLOGY,
-        "standard": config.STANDARD,
-        "location": location,
-        "contributing_readings": contributing,
-    }
+    flagged = [row["reading_id"] for row, _, _ in bucket if row["anomaly_flags"]]
+    review_hold = (
+        f"{len(flagged)} contributing reading(s) flagged by anomaly screening"
+        if flagged else None
+    )
+    status = "verified" if _device_is_verified(device) and not review_hold else "pending"
+
+    certificate = build_certificate(
+        credit_id, device, device_id, owner_user_id, bucket, review_hold
+    )
+    total_kwh = certificate["energy_kwh"]
+    contributing = [
+        {"id": row["id"], "reading_id": row["reading_id"], "signature": row["signature"],
+         "kg": round(kg, 6), "kwh": round(kwh, 6)}
+        for row, kg, kwh in bucket
+    ]
 
     row_id = await database.execute(
         query="""INSERT INTO credits
             (credit_id, device_id, owner_user_id, total_kwh, co2_avoided_kg,
              period_start, period_end, methodology, standard, location,
-             status, contributing_readings, ipfs_hash)
+             status, contributing_readings, ipfs_hash, certificate, review_hold)
             VALUES (:credit_id, :device_id, :owner_user_id, :total_kwh, :co2_avoided_kg,
                     :period_start, :period_end, :methodology, :standard, :location,
-                    :status, :contributing_readings, :ipfs_hash)""",
+                    :status, :contributing_readings, :ipfs_hash, :certificate, :review_hold)""",
         values={
             "credit_id": credit_id,
             "device_id": device_id,
             "owner_user_id": owner_user_id,
             "total_kwh": total_kwh,
             "co2_avoided_kg": config.KG_CO2_PER_CREDIT,
-            "period_start": period_start,
-            "period_end": period_end,
+            "period_start": certificate["period_start"],
+            "period_end": certificate["period_end"],
             "methodology": config.METHODOLOGY,
             "standard": config.STANDARD,
-            "location": location,
+            "location": bucket[-1][0]["location"] or "India",
             "status": status,
             "contributing_readings": json.dumps(contributing),
-            "ipfs_hash": upload_credit_to_ipfs(certificate),
+            # Pinning is a network call and must not happen inside the ingest
+            # transaction; pin_unpinned_certificates() does it afterwards.
+            "ipfs_hash": f"local-{_content_hash(certificate)}",
+            "certificate": canonical_json(certificate),
+            "review_hold": review_hold,
         },
     )
 
-    reading_ids = [item["id"] for item in contributing]
-    placeholders = ", ".join(f":r{i}" for i in range(len(reading_ids)))
-    await database.execute(
-        query=f"""UPDATE generation_readings SET consumed_by_credit_id = :credit_row_id
-                  WHERE id IN ({placeholders})""",
-        values={"credit_row_id": row_id, **{f"r{i}": rid for i, rid in enumerate(reading_ids)}},
-    )
+    for row, kg, kwh in bucket:
+        await database.execute(
+            query="""INSERT INTO credit_allocations (credit_row_id, reading_row_id, kwh, kg)
+                     VALUES (:credit, :reading, :kwh, :kg)""",
+            values={"credit": row_id, "reading": row["id"], "kwh": kwh, "kg": kg},
+        )
+        row["allocated_kg"] += kg
+        fully_allocated = row["allocated_kg"] >= row["co2_avoided_kg"] - _KG_EPSILON
+        await database.execute(
+            query="""UPDATE generation_readings
+                     SET allocated_kg = :allocated,
+                         consumed_by_credit_id = CASE WHEN :full THEN :credit
+                                                      ELSE consumed_by_credit_id END
+                     WHERE id = :id""",
+            values={
+                "allocated": row["allocated_kg"],
+                "full": 1 if fully_allocated else 0,
+                "credit": row_id,
+                "id": row["id"],
+            },
+        )
 
     return row_id
+
+
+async def _issue_for_device(device_id: str, owner_user_id: int) -> int:
+    """
+    Walk a device's unallocated CO2 in time order and cut whole credits from it.
+
+    A reading's CO2 may straddle two credits: the part that completes one is
+    allocated to it and the rest opens the next. Nothing is rounded away and
+    nothing is held only in memory, so the remainder survives between ingests
+    and every credit's allocations add up to exactly one credit's worth.
+    """
+    rows = [
+        dict(r) for r in await database.fetch_all(
+            query="""SELECT id, reading_id, device_id, owner_user_id, total_kwh,
+                            co2_avoided_kg, allocated_kg, timestamp, location, signature,
+                            device_signature, signed_message, message_version,
+                            emission_factor, anomaly_flags
+                     FROM generation_readings
+                     WHERE device_id = :device_id AND consumed_by_credit_id IS NULL
+                     ORDER BY timestamp ASC, id ASC""",
+            values={"device_id": device_id},
+        )
+    ]
+    if not rows:
+        return 0
+
+    device = await _device_record(device_id)
+    issued = 0
+    bucket: list[tuple[dict, float, float]] = []
+    needed = config.KG_CO2_PER_CREDIT
+
+    for row in rows:
+        remaining = row["co2_avoided_kg"] - row["allocated_kg"]
+        kwh_per_kg = row["total_kwh"] / row["co2_avoided_kg"] if row["co2_avoided_kg"] > 0 else 0.0
+
+        while True:
+            take = min(max(remaining, 0.0), needed)
+            bucket.append((row, take, take * kwh_per_kg))
+            remaining -= take
+            needed -= take
+
+            if needed > _KG_EPSILON:
+                break
+
+            await _issue_credit(
+                device_id, row["owner_user_id"] or owner_user_id, device, bucket
+            )
+            issued += 1
+            bucket, needed = [], config.KG_CO2_PER_CREDIT
+            if remaining <= _KG_EPSILON:
+                break
+
+    return issued
 
 
 async def process_raw_readings(
@@ -508,59 +802,63 @@ async def process_raw_readings(
     Ingest readings and aggregate them into whole-tonne credits.
 
     Returns (readings_inserted, credits_issued). Both steps are idempotent:
-    readings are keyed by fingerprint and only unconsumed readings contribute to
-    a new credit, so any leftover CO2 carries forward to the next ingestion.
+    readings are keyed by fingerprint and only unallocated CO2 contributes to a
+    new credit, so leftover CO2 carries forward to the next ingestion. Only the
+    devices named in this batch are re-examined.
     """
     inserted = await _insert_readings(readings, owner_user_id)
 
-    unconsumed = await database.fetch_all(
-        """SELECT id, reading_id, device_id, owner_user_id, total_kwh,
-                  co2_avoided_kg, timestamp, location, signature
-           FROM generation_readings
-           WHERE consumed_by_credit_id IS NULL
-           ORDER BY device_id, timestamp ASC"""
-    )
-
-    # Credits are per-device, so each device accumulates its own remainder.
-    by_device: dict[str, list] = {}
-    for row in unconsumed:
-        by_device.setdefault(row["device_id"], []).append(row)
-
     credits_issued = 0
-    for device_id, group in by_device.items():
-        acc_co2 = 0.0
-        acc_kwh = 0.0
-        acc_readings: list[dict] = []
-        period_start: Optional[str] = None
-
-        for row in group:
-            if period_start is None:
-                period_start = row["timestamp"]
-
-            acc_co2 += row["co2_avoided_kg"]
-            acc_kwh += row["total_kwh"]
-            acc_readings.append(
-                {"reading_id": row["reading_id"], "signature": row["signature"], "id": row["id"]}
-            )
-
-            while acc_co2 >= config.KG_CO2_PER_CREDIT:
-                await _issue_credit(
-                    device_id=device_id,
-                    owner_user_id=row["owner_user_id"] or owner_user_id,
-                    total_kwh=acc_kwh,
-                    period_start=period_start,
-                    period_end=row["timestamp"],
-                    location=row["location"] or "India",
-                    contributing=acc_readings,
-                )
-                credits_issued += 1
-
-                acc_co2 -= config.KG_CO2_PER_CREDIT
-                acc_kwh = 0.0
-                acc_readings = []
-                period_start = row["timestamp"]
+    for device_id in sorted({r.get("device_id") for r in readings if r.get("device_id")}):
+        credits_issued += await _issue_for_device(device_id, owner_user_id)
 
     return inserted, credits_issued
+
+
+async def pin_unpinned_certificates(limit: int = 20) -> int:
+    """
+    Pin stored certificates that were only hashed locally at issuance.
+
+    Runs outside any transaction. The stored certificate text is pinned byte
+    for byte, so the CID always addresses the document the credit was issued
+    with. Returns how many were pinned; failures leave the local hash in place
+    for the next attempt.
+    """
+    import ipfs_utils
+
+    if not ipfs_utils.pinning_configured():
+        return 0
+
+    rows = await database.fetch_all(
+        query="""SELECT credit_id, certificate FROM credits
+                 WHERE ipfs_hash LIKE 'local-%' AND certificate IS NOT NULL
+                   AND on_chain_id IS NULL
+                 ORDER BY credit_id LIMIT :limit""",
+        values={"limit": limit},
+    )
+
+    pinned = 0
+    for row in rows:
+        try:
+            cid = await asyncio.to_thread(
+                ipfs_utils.pin_certificate, json.loads(row["certificate"]), row["credit_id"]
+            )
+        except ipfs_utils.IPFSUploadError as exc:
+            print(f"⚠ {exc}")
+            break
+        await db_execute_with_retry(
+            query="UPDATE credits SET ipfs_hash = :cid WHERE credit_id = :credit_id",
+            values={"cid": cid, "credit_id": row["credit_id"]},
+        )
+        pinned += 1
+    return pinned
+
+
+async def record_device_event(device_id: str, kind: str, detail: str) -> None:
+    await database.execute(
+        query="INSERT INTO device_events (device_id, kind, detail) VALUES (:d, :k, :detail)",
+        values={"d": device_id, "k": kind, "detail": detail},
+    )
 
 
 # ── Seeding ────────────────────────────────────────────────────────────────
@@ -597,19 +895,23 @@ async def _seed_demo_data():
         wallet_address=config.DEMO_INSTALLER_WALLET,
     )
 
-    # Earlier builds seeded a placeholder that only looked like an address.
-    # It is not valid hex, so any mint to it would have reverted on-chain.
+    # Earlier builds seeded a placeholder that only looked like an address, and
+    # later the contract's own address. The first reverts any mint; the second
+    # mints into a contract that can never move or retire what it holds.
     #
     # The wildcard is bound as a parameter rather than written into the SQL:
     # the query compiler applies %-formatting to the statement text, so a
     # literal % in a LIKE pattern raises at execution time.
     await database.execute(
         query="""UPDATE users SET wallet_address = :addr
-                 WHERE email = :email AND wallet_address LIKE :placeholder""",
+                 WHERE email = :email
+                   AND (wallet_address LIKE :placeholder
+                        OR lower(wallet_address) = lower(:contract))""",
         values={
             "addr": config.DEMO_INSTALLER_WALLET,
             "email": config.DEMO_INSTALLER_EMAIL,
             "placeholder": "0xDemo%",
+            "contract": config.CONTRACT_ADDRESS,
         },
     )
 

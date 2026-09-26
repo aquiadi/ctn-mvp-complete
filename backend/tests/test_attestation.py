@@ -11,34 +11,7 @@ import attestation
 import config
 import database
 from tests.conftest import auth
-
-
-class SimulatedSensor:
-    """
-    Stands in for firmware: holds a private key, counts its own sequence, and
-    signs every reading it emits. The private key never reaches the server.
-    """
-
-    def __init__(self, device_id: str):
-        self.device_id = device_id
-        self.private_key, self.public_key = attestation.generate_device_keypair()
-        self.sequence = 0
-
-    def reading(self, delta_kwh: float, timestamp: str = None, sequence: int = None) -> dict:
-        if sequence is None:
-            self.sequence += 1
-            sequence = self.sequence
-        timestamp = timestamp or f"2026-05-01T{sequence % 24:02d}:00:00Z"
-
-        return {
-            "device_id": self.device_id,
-            "sequence": sequence,
-            "timestamp": timestamp,
-            "delta_kwh": delta_kwh,
-            "signature": attestation.sign_reading(
-                self.private_key, self.device_id, sequence, timestamp, delta_kwh
-            ),
-        }
+from tests.sensors import SimulatedSensor  # noqa: F401  (re-exported for other suites)
 
 
 async def _register(app_client, admin_token, make_user, sensor, with_key=True):

@@ -58,7 +58,29 @@ async def test_the_seeded_demo_wallet_is_a_valid_address(app_client):
     """A placeholder that merely looks like an address reverts the mint call."""
     from web3 import Web3
 
-    assert Web3.to_checksum_address(config.DEMO_INSTALLER_WALLET)
+    if config.DEMO_INSTALLER_WALLET is not None:
+        assert Web3.to_checksum_address(config.DEMO_INSTALLER_WALLET)
+
+
+async def test_the_demo_wallet_is_never_the_contract_itself(app_client):
+    """
+    Regression test.
+
+    The demo wallet defaulted to the contract address, so demo credits were
+    minted into a contract that can neither transfer nor retire them.
+    """
+    assert (config.DEMO_INSTALLER_WALLET or "").lower() != config.CONTRACT_ADDRESS.lower()
+
+
+def test_custody_is_the_signing_wallet(monkeypatch):
+    from eth_account import Account
+
+    key = "0x" + "11" * 32
+    monkeypatch.setattr(config, "PRIVATE_KEY", key[2:])
+    assert config._custody_address() == Account.from_key(key).address
+
+    monkeypatch.setattr(config, "PRIVATE_KEY", "")
+    assert config._custody_address() is None
 
 
 async def test_migrations_add_the_on_chain_columns(app_client):

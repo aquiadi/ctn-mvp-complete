@@ -21,9 +21,19 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import to_checksum_address
 
-# Bumping this invalidates every previously issued signature, so it changes only
-# if the signed field set itself changes.
-MESSAGE_VERSION = "CTN-READING-V1"
+# A version string is the first line of every signed message, so a signature
+# can only ever be checked against the field set it was produced over. Adding a
+# version never invalidates an older one; devices in the field keep working.
+MESSAGE_VERSION_V1 = "CTN-READING-V1"
+MESSAGE_VERSION_V2 = "CTN-READING-V2"
+SUPPORTED_VERSIONS = (MESSAGE_VERSION_V1, MESSAGE_VERSION_V2)
+
+# What new firmware should emit. V2 adds the device's lifetime energy counter,
+# which lets the server check each interval against the meter and lets a device
+# resynchronise after a lost response without counting energy twice, and the
+# enclosure tamper counter, which revokes installation confirmation when the
+# box has been opened.
+MESSAGE_VERSION = MESSAGE_VERSION_V2
 
 # Fixed precision for the energy field. Floats have no single textual form, so a
 # device writing "0.61" and a server reading 0.6100000000000001 would otherwise
@@ -36,7 +46,13 @@ class AttestationError(ValueError):
 
 
 def canonical_message(
-    device_id: str, sequence: int, timestamp: str, delta_kwh: float
+    device_id: str,
+    sequence: int,
+    timestamp: str,
+    delta_kwh: float,
+    version: str = MESSAGE_VERSION_V1,
+    meter_wh: Optional[int] = None,
+    tamper_count: Optional[int] = None,
 ) -> str:
     """
     The exact text a device signs.
@@ -44,14 +60,25 @@ def canonical_message(
     Newline-delimited and explicitly labelled so it is readable in firmware logs
     and cannot be reordered. Every field that affects the credit is covered:
     omitting any one of them would let it be altered in transit.
+
+    V2 appends the lifetime meter counter and the tamper counter, both as plain
+    unsigned integers so there is exactly one textual form for each.
     """
-    return (
-        f"{MESSAGE_VERSION}\n"
+    message = (
+        f"{version}\n"
         f"device:{device_id}\n"
         f"sequence:{sequence}\n"
         f"timestamp:{timestamp}\n"
         f"delta_kwh:{delta_kwh:.{KWH_DECIMALS}f}"
     )
+
+    if version == MESSAGE_VERSION_V1:
+        return message
+    if version != MESSAGE_VERSION_V2:
+        raise AttestationError(f"Unsupported message version '{version}'.")
+    if meter_wh is None or tamper_count is None:
+        raise AttestationError(f"{MESSAGE_VERSION_V2} requires meter_wh and tamper_count.")
+    return f"{message}\nmeter_wh:{int(meter_wh)}\ntamper_count:{int(tamper_count)}"
 
 
 def _candidate_signatures(signature: str) -> list[bytes]:
@@ -115,6 +142,9 @@ def verify_reading(
     timestamp: str,
     delta_kwh: float,
     signature: str,
+    version: str = MESSAGE_VERSION_V1,
+    meter_wh: Optional[int] = None,
+    tamper_count: Optional[int] = None,
 ) -> str:
     """
     Confirm a reading was signed by the device it claims to come from.
@@ -122,7 +152,9 @@ def verify_reading(
     Returns the canonical message on success so it can be stored verbatim for
     independent re-verification. Raises AttestationError otherwise.
     """
-    message = canonical_message(device_id, sequence, timestamp, delta_kwh)
+    message = canonical_message(
+        device_id, sequence, timestamp, delta_kwh, version, meter_wh, tamper_count
+    )
     recovered = recover_signer(message, signature, expected=device_public_key)
 
     if recovered.lower() != device_public_key.lower():
@@ -163,13 +195,22 @@ def generate_device_keypair() -> tuple[str, str]:
 
 
 def sign_reading(
-    private_key: str, device_id: str, sequence: int, timestamp: str, delta_kwh: float
+    private_key: str,
+    device_id: str,
+    sequence: int,
+    timestamp: str,
+    delta_kwh: float,
+    version: str = MESSAGE_VERSION_V1,
+    meter_wh: Optional[int] = None,
+    tamper_count: Optional[int] = None,
 ) -> str:
     """
     Produce a reading signature. This is the reference implementation of what
     firmware must do, and is what the test suite's simulated sensor uses.
     """
-    message = canonical_message(device_id, sequence, timestamp, delta_kwh)
+    message = canonical_message(
+        device_id, sequence, timestamp, delta_kwh, version, meter_wh, tamper_count
+    )
     signed = Account.sign_message(encode_defunct(text=message), private_key)
     return signed.signature.hex()
 

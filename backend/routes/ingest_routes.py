@@ -10,16 +10,24 @@ Everything here is versioned under /api/v1 because firmware, once deployed to a
 roof, cannot be redeployed as easily as this server.
 """
 
+import json
 import re
 import time
-from typing import List, Optional
+from typing import List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+import anomaly
 import attestation
 import config
-from database import database, process_raw_readings
+import plausibility
+from database import (
+    database,
+    pin_unpinned_certificates,
+    process_raw_readings,
+    record_device_event,
+)
 from rate_limit import limiter
 
 router = APIRouter(prefix="/api/v1", tags=["ingestion"])
@@ -35,11 +43,24 @@ class SignedReading(BaseModel):
     timestamp: str = Field(..., min_length=4, max_length=64)
     delta_kwh: float = Field(..., ge=0)
     signature: str = Field(..., min_length=64, max_length=200)
+    message_version: Literal["CTN-READING-V1", "CTN-READING-V2"] = attestation.MESSAGE_VERSION_V1
+    # V2 only: the device's lifetime energy counter in watt-hours, and the
+    # number of enclosure-open events it has recorded. Both only ever increase.
+    meter_wh: Optional[int] = Field(default=None, ge=0)
+    tamper_count: Optional[int] = Field(default=None, ge=0)
 
     @field_validator("device_id", "timestamp", "signature")
     @classmethod
     def strip(cls, value: str) -> str:
         return value.strip()
+
+    @model_validator(mode="after")
+    def v2_fields_present(self):
+        if self.message_version == attestation.MESSAGE_VERSION_V2 and (
+            self.meter_wh is None or self.tamper_count is None
+        ):
+            raise ValueError(f"{attestation.MESSAGE_VERSION_V2} requires meter_wh and tamper_count.")
+        return self
 
 
 class ReadingBatch(BaseModel):
@@ -99,7 +120,8 @@ async def enroll_device(request: Request, req: DeviceEnrollment):
 
     async with database.transaction():
         enrollment = await database.fetch_one(
-            query="""SELECT id, owner_user_id, label, location, expires_at, used_at
+            query="""SELECT id, owner_user_id, label, location, expires_at, used_at,
+                            rated_capacity_kw, latitude, longitude
                      FROM device_enrollments WHERE code = :code""",
             values={"code": req.enrollment_code},
         )
@@ -132,13 +154,19 @@ async def enroll_device(request: Request, req: DeviceEnrollment):
 
         await database.execute(
             query="""INSERT INTO devices
-                     (device_id, owner_user_id, location, public_key, enrolled_via, verified)
-                     VALUES (:device_id, :owner_id, :location, :public_key, 'pairing_code', 0)""",
+                     (device_id, owner_user_id, location, public_key, enrolled_via, verified,
+                      rated_capacity_kw, latitude, longitude, created_at)
+                     VALUES (:device_id, :owner_id, :location, :public_key, 'pairing_code', 0,
+                             :capacity, :latitude, :longitude, :now)""",
             values={
                 "device_id": req.device_id,
                 "owner_id": enrollment["owner_user_id"],
                 "location": enrollment["location"] or "India",
                 "public_key": req.public_key,
+                "capacity": enrollment["rated_capacity_kw"],
+                "latitude": enrollment["latitude"],
+                "longitude": enrollment["longitude"],
+                "now": now,
             },
         )
         await database.execute(
@@ -153,6 +181,7 @@ async def enroll_device(request: Request, req: DeviceEnrollment):
         "public_key": req.public_key,
         "verified": False,
         "next_sequence": 1,
+        "message_version": attestation.MESSAGE_VERSION,
         "message": (
             "Device enrolled. Start posting signed readings to /api/v1/readings. "
             "Credits accrue immediately but cannot be sold until an operator has "
@@ -163,17 +192,62 @@ async def enroll_device(request: Request, req: DeviceEnrollment):
 
 # ── Ingestion ──────────────────────────────────────────────────────────────
 
+async def _recent_intervals(device_id: str) -> list[tuple[float, float, float]]:
+    """
+    The device's recent attested intervals as (start, end, kWh), oldest first,
+    for anomaly screening. Each interval runs from the previous reading.
+    """
+    rows = await database.fetch_all(
+        query="""SELECT timestamp, total_kwh FROM generation_readings
+                 WHERE device_id = :device_id AND device_signature IS NOT NULL
+                 ORDER BY timestamp DESC LIMIT :limit""",
+        values={"device_id": device_id, "limit": config.ANOMALY_HISTORY_WINDOW + 1},
+    )
+
+    points = []
+    for row in reversed(rows):
+        try:
+            at = plausibility.parse_device_timestamp(row["timestamp"]).timestamp()
+        except plausibility.PlausibilityError:
+            continue
+        points.append((at, row["total_kwh"]))
+
+    return [(prev[0], cur[0], cur[1]) for prev, cur in zip(points, points[1:])]
+
+
+def _rejected(reading: SignedReading, exc: plausibility.PlausibilityError) -> HTTPException:
+    return HTTPException(
+        422,
+        {
+            "code": exc.code,
+            "sequence": reading.sequence,
+            "message": f"Reading at sequence {reading.sequence} rejected: {exc.message}",
+        },
+    )
+
+
 @router.post("/readings")
 @limiter.limit(config.INGEST_RATE_LIMIT)
-async def ingest_signed_readings(request: Request, batch: ReadingBatch):
+async def ingest_signed_readings(
+    request: Request, batch: ReadingBatch, background: BackgroundTasks
+):
     """
     Accept signed readings from a device.
 
-    Verification order matters: the device must be known and provisioned with a
-    key, every signature must verify, and every sequence must advance past what
-    has already been accepted. Only then is anything written — a batch is
-    all-or-nothing so a partially applied upload cannot leave a gap that looks
-    like missing generation.
+    Order of checks, each of which rejects the whole batch:
+
+      1. The device is known and has a signing key.
+      2. Sequences ascend and advance past everything already accepted (409).
+      3. Every signature verifies against the device key (401).
+      4. Every reading is physically plausible: a well-formed UTC timestamp
+         inside the clock-skew and backfill windows and after the previous
+         reading, energy within what the rated capacity could export over the
+         interval, and for V2 a meter counter that advanced by exactly the
+         claimed energy (422).
+
+    Authentication comes before plausibility so an unauthenticated caller
+    learns nothing about the device's state. Statistical screening then runs
+    over what passed; it flags, it never rejects.
     """
     device_ids = {r.device_id for r in batch.readings}
     if len(device_ids) != 1:
@@ -184,7 +258,9 @@ async def ingest_signed_readings(request: Request, batch: ReadingBatch):
 
     device_id = next(iter(device_ids))
     device = await database.fetch_one(
-        query="""SELECT device_id, owner_user_id, location, public_key, last_sequence
+        query="""SELECT device_id, owner_user_id, location, public_key, last_sequence,
+                        created_at, rated_capacity_kw, latitude, longitude,
+                        last_reading_at, last_meter_wh, tamper_count, verified
                  FROM devices WHERE device_id = :device_id""",
         values={"device_id": device_id},
     )
@@ -210,8 +286,21 @@ async def ingest_signed_readings(request: Request, batch: ReadingBatch):
         )
 
     last_sequence = device["last_sequence"] or 0
+    state = plausibility.DeviceState(
+        device_id=device_id,
+        registered_at=device["created_at"],
+        rated_capacity_kw=device["rated_capacity_kw"],
+        last_reading_at=device["last_reading_at"],
+        last_meter_wh=device["last_meter_wh"],
+        tamper_count=device["tamper_count"] or 0,
+    )
+    history = await _recent_intervals(device_id)
+    now = time.time()
+
     seen: set[int] = set()
     prepared = []
+    tamper_advanced = False
+    flagged = 0
 
     for reading in ordered:
         if reading.sequence in seen:
@@ -228,6 +317,7 @@ async def ingest_signed_readings(request: Request, batch: ReadingBatch):
                 f"(currently at {last_sequence}). This packet is a replay.",
             )
 
+        is_v2 = reading.message_version == attestation.MESSAGE_VERSION_V2
         try:
             signed_message = attestation.verify_reading(
                 device_public_key=device["public_key"],
@@ -236,6 +326,9 @@ async def ingest_signed_readings(request: Request, batch: ReadingBatch):
                 timestamp=reading.timestamp,
                 delta_kwh=reading.delta_kwh,
                 signature=attestation.signature_hex(reading.signature),
+                version=reading.message_version,
+                meter_wh=reading.meter_wh,
+                tamper_count=reading.tamper_count,
             )
         except attestation.AttestationError as exc:
             raise HTTPException(
@@ -243,18 +336,58 @@ async def ingest_signed_readings(request: Request, batch: ReadingBatch):
                 f"Reading at sequence {reading.sequence} failed attestation: {exc}",
             )
 
+        try:
+            if not is_v2 and state.last_meter_wh is not None:
+                raise plausibility.PlausibilityError(
+                    "version_downgrade",
+                    "This device already reports its meter counter; V1 readings, which "
+                    "omit it, are no longer accepted from it.",
+                )
+            at = plausibility.check_timestamp(reading.timestamp, state.last_reading_at, state, now)
+            seconds = plausibility.interval_seconds(at, state.last_reading_at, state)
+            plausibility.check_capacity(reading.delta_kwh, seconds, state)
+            if is_v2:
+                plausibility.check_meter_continuity(reading.delta_kwh, reading.meter_wh, state)
+                if plausibility.check_tamper_counter(reading.tamper_count, state):
+                    tamper_advanced = True
+        except plausibility.PlausibilityError as exc:
+            raise _rejected(reading, exc)
+
+        start = (
+            plausibility.parse_device_timestamp(state.last_reading_at).timestamp()
+            if state.last_reading_at else state.registered_at
+        )
+        flags = anomaly.screen(
+            reading.delta_kwh, start, at, device["latitude"], device["longitude"], history
+        )
+        history.append((start, at, reading.delta_kwh))
+        flagged += bool(flags)
+
         prepared.append(
             {
                 "device_id": reading.device_id,
                 "timestamp": reading.timestamp,
                 "total_kwh": reading.delta_kwh,
                 "co2_avoided_kg": reading.delta_kwh * config.EMISSION_FACTOR_KG_PER_KWH,
+                "emission_factor": config.EMISSION_FACTOR_KG_PER_KWH,
                 "location": device["location"],
                 "owner_user_id": device["owner_user_id"],
                 "device_signature": attestation.signature_hex(reading.signature),
                 "signed_message": signed_message,
                 "sequence": reading.sequence,
+                "message_version": reading.message_version,
+                "meter_wh": reading.meter_wh,
+                "tamper_count": reading.tamper_count,
+                "anomaly_flags": flags,
             }
+        )
+        state = plausibility.DeviceState(
+            device_id=device_id,
+            registered_at=state.registered_at,
+            rated_capacity_kw=state.rated_capacity_kw,
+            last_reading_at=reading.timestamp,
+            last_meter_wh=reading.meter_wh if is_v2 else state.last_meter_wh,
+            tamper_count=reading.tamper_count if is_v2 else state.tamper_count,
         )
 
     highest = prepared[-1]["sequence"]
@@ -263,10 +396,15 @@ async def ingest_signed_readings(request: Request, batch: ReadingBatch):
         # Guarded so two concurrent uploads cannot both advance the counter;
         # the loser sees no rows changed and is rejected as a replay.
         await database.execute(
-            query="""UPDATE devices SET last_sequence = :highest
+            query="""UPDATE devices
+                     SET last_sequence = :highest, last_reading_at = :last_reading_at,
+                         last_meter_wh = :last_meter_wh, tamper_count = :tamper_count
                      WHERE device_id = :device_id AND last_sequence = :expected""",
             values={
                 "highest": highest,
+                "last_reading_at": state.last_reading_at,
+                "last_meter_wh": state.last_meter_wh,
+                "tamper_count": state.tamper_count,
                 "device_id": device_id,
                 "expected": last_sequence,
             },
@@ -281,15 +419,37 @@ async def ingest_signed_readings(request: Request, batch: ReadingBatch):
                 "Another upload for this device landed first. Retry with fresh sequences.",
             )
 
+        if tamper_advanced:
+            # An opened enclosure means the installation an operator confirmed
+            # may no longer be the one reporting. Confirmation is withdrawn, so
+            # credits from here on are issued pending until someone looks.
+            await database.execute(
+                query="""UPDATE devices SET verified = 0, verified_at = NULL, verified_by = NULL
+                         WHERE device_id = :device_id""",
+                values={"device_id": device_id},
+            )
+            await record_device_event(
+                device_id, "tamper",
+                f"Enclosure tamper counter advanced to {state.tamper_count}; "
+                "installation confirmation withdrawn.",
+            )
+
         inserted, issued = await process_raw_readings(prepared, device["owner_user_id"])
+
+    if issued:
+        background.add_task(pin_unpinned_certificates)
 
     return {
         "status": "accepted",
         "device_id": device_id,
         "readings_accepted": inserted,
         "readings_submitted": len(prepared),
+        "readings_flagged": flagged,
         "credits_issued": issued,
         "sequence": highest,
+        "meter_wh": state.last_meter_wh,
+        "tamper_count": state.tamper_count,
+        "installation_confirmed": bool(device["verified"]) and not tamper_advanced,
         "attested": True,
         "message": f"{inserted} attested reading(s) recorded; {issued} credit(s) issued.",
     }
@@ -308,7 +468,8 @@ async def device_public_record(device_id: str):
     """
     device = await database.fetch_one(
         query="""SELECT device_id, location, public_key, last_sequence, created_at,
-                        verified, enrolled_via
+                        verified, enrolled_via, rated_capacity_kw, latitude, longitude,
+                        last_reading_at, last_meter_wh, tamper_count
                  FROM devices WHERE device_id = :device_id""",
         values={"device_id": device_id},
     )
@@ -330,7 +491,15 @@ async def device_public_record(device_id: str):
         "attestation_enabled": bool(device["public_key"]),
         "verified": bool(device["verified"]),
         "enrolled_via": device["enrolled_via"] or "operator",
+        # What a device needs to resynchronise after losing a response: the
+        # last sequence and meter counter the server actually committed.
         "last_sequence": device["last_sequence"],
+        "last_reading_at": device["last_reading_at"],
+        "last_meter_wh": device["last_meter_wh"],
+        "tamper_count": device["tamper_count"] or 0,
+        "rated_capacity_kw": device["rated_capacity_kw"],
+        "latitude": device["latitude"],
+        "longitude": device["longitude"],
         "readings_total": counts["total"],
         "readings_attested": counts["attested"],
         "registered_at": device["created_at"],
@@ -368,6 +537,9 @@ async def reading_proof(reading_id: str):
         "co2_avoided_kg": reading["co2_avoided_kg"],
         "attested": bool(reading["device_signature"]),
         "content_hash": reading["signature"],
+        "emission_factor": reading["emission_factor"],
+        "allocated_kg": round(reading["allocated_kg"] or 0, 6),
+        "anomaly_flags": json.loads(reading["anomaly_flags"]) if reading["anomaly_flags"] else [],
         "credit": _credit_link(reading),
     }
 
@@ -395,7 +567,9 @@ async def reading_proof(reading_id: str):
             "recovered_signer": recovered,
             "signature_valid": verified,
             "sequence": reading["sequence"],
-            "message_version": attestation.MESSAGE_VERSION,
+            "message_version": reading["message_version"] or attestation.MESSAGE_VERSION_V1,
+            "meter_wh": reading["meter_wh"],
+            "tamper_count": reading["tamper_count"],
             "how_to_verify": (
                 "Recover the EIP-191 signer of `signed_message` from "
                 "`device_signature` and compare it to `device_public_key`."
@@ -426,10 +600,15 @@ def ingestion_spec():
     Firmware authors need the exact byte layout; publishing it here keeps the
     documentation from drifting away from the implementation.
     """
-    example = attestation.canonical_message("INV-2401-7788", 1042, "2026-04-01T06:00:00Z", 0.61)
+    example_v1 = attestation.canonical_message("INV-2401-7788", 1042, "2026-04-01T06:00:00Z", 0.61)
+    example_v2 = attestation.canonical_message(
+        "INV-2401-7788", 1042, "2026-04-01T06:00:00Z", 0.61,
+        attestation.MESSAGE_VERSION_V2, meter_wh=1284610, tamper_count=0,
+    )
     return {
         "message_version": attestation.MESSAGE_VERSION,
-        "signature_scheme": "EIP-191 personal_sign over secp256k1",
+        "supported_versions": list(attestation.SUPPORTED_VERSIONS),
+        "signature_scheme": "EIP-191 personal_sign over secp256k1 (Keccak-256 digest)",
         "signature_format": (
             "0x-prefixed r||s (64 bytes), with or without a trailing recovery id. "
             "Embedded libraries that cannot derive the recovery id may omit it; "
@@ -437,20 +616,54 @@ def ingestion_spec():
         ),
         "key_format": "0x-prefixed 20-byte address derived from the device signing key",
         "kwh_decimals": attestation.KWH_DECIMALS,
-        "canonical_message_template": (
-            f"{attestation.MESSAGE_VERSION}\\n"
-            "device:{device_id}\\n"
-            "sequence:{sequence}\\n"
-            "timestamp:{timestamp}\\n"
-            "delta_kwh:{delta_kwh with 6 decimal places}"
-        ),
-        "example_message": example,
+        "timestamp_format": "YYYY-MM-DDTHH:MM:SSZ (UTC, no fractional seconds)",
+        "canonical_message_template": {
+            attestation.MESSAGE_VERSION_V1: (
+                f"{attestation.MESSAGE_VERSION_V1}\\n"
+                "device:{device_id}\\n"
+                "sequence:{sequence}\\n"
+                "timestamp:{timestamp}\\n"
+                "delta_kwh:{delta_kwh with 6 decimal places}"
+            ),
+            attestation.MESSAGE_VERSION_V2: (
+                f"{attestation.MESSAGE_VERSION_V2}\\n"
+                "device:{device_id}\\n"
+                "sequence:{sequence}\\n"
+                "timestamp:{timestamp}\\n"
+                "delta_kwh:{delta_kwh with 6 decimal places}\\n"
+                "meter_wh:{lifetime energy counter, integer Wh}\\n"
+                "tamper_count:{enclosure-open events, integer}"
+            ),
+        },
+        "example_message": example_v2,
+        "example_message_v1": example_v1,
+        "limits": {
+            "max_clock_skew_seconds": config.MAX_CLOCK_SKEW_SECONDS,
+            "max_reading_age_hours": config.MAX_READING_AGE_HOURS,
+            "default_rated_capacity_kw": config.DEFAULT_RATED_CAPACITY_KW,
+            "capacity_tolerance": config.CAPACITY_TOLERANCE,
+            "min_plausibility_interval_seconds": config.MIN_PLAUSIBILITY_INTERVAL_SECONDS,
+            "meter_continuity_tolerance_wh": config.METER_CONTINUITY_TOLERANCE_WH,
+        },
         "rules": [
-            "Sequence numbers start at 1 and must strictly increase per device.",
-            "A sequence already accepted is rejected as a replay.",
+            "Sequence numbers start at 1 and must strictly increase per device (409).",
+            "A sequence already accepted is rejected as a replay (409).",
             "Batches must contain one device and ascending sequences.",
-            "delta_kwh is the generation for that interval, not a meter total.",
+            "Signatures are verified before any other content rule (401).",
+            "Timestamps must be after the previous accepted reading, no more than "
+            "max_clock_skew_seconds in the future, and within max_reading_age_hours (422).",
+            "delta_kwh is the generation for that interval, not a meter total, and may "
+            "not exceed rated capacity x interval x capacity_tolerance (422).",
+            "V2: meter_wh must advance by exactly delta_kwh x 1000 (422) and never decrease.",
+            "V2: tamper_count never decreases. An increase withdraws installation "
+            "confirmation, so later credits are issued pending review.",
+            "Once a device has sent V2, V1 readings from it are refused (422).",
             "Readings are rejected whole; a batch never applies partially.",
+            "Anomaly screening never rejects; flagged readings hold their credit for review.",
         ],
+        "resync": (
+            "After an ambiguous failure (timeout, lost response, 409), GET "
+            "/api/v1/devices/{device_id} and continue from last_sequence and last_meter_wh."
+        ),
         "endpoint": "POST /api/v1/readings",
     }
