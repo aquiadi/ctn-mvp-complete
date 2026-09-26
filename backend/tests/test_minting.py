@@ -44,8 +44,8 @@ class FakeChain:
             raise self.lookup_result
         return self.lookup_result
 
-    async def retire(self, on_chain_id, beneficiary=""):
-        self.retirements.append((on_chain_id, beneficiary))
+    async def retire(self, on_chain_id, beneficiary="", address=None):
+        self.retirements.append((on_chain_id, beneficiary, address))
         return f"0x{'f' * 63}{len(self.retirements)}"
 
 
@@ -238,3 +238,77 @@ async def test_a_named_beneficiary_is_recorded(app_client, admin_token, make_use
     assert (credit["retirement_beneficiary"], credit["retirement_purpose"]) == (
         "Acme Ltd", "FY2026 Scope 2",
     )
+
+
+# ── Moving to a new contract ───────────────────────────────────────────────
+
+V2_ADDRESS = "0x" + "c2" * 20
+
+
+async def test_a_mint_records_the_contract_it_went_to(app_client, admin_token, make_user, fake_chain):
+    credit_id = await _issue_credit(app_client, admin_token, make_user, "MNT-WHERE")
+    await _mint(app_client, admin_token, credit_id)
+    assert (await _credit(credit_id))["contract_address"] == chain.contract.address
+
+
+async def test_old_credits_stay_on_their_contract_after_a_switch(
+    app_client, admin_token, make_user, fake_chain, monkeypatch
+):
+    """
+    Pointing CONTRACT_ADDRESS at a V2 deployment must not send reads or
+    retirements for V1 credits to the new contract, where their ids mean
+    something else or nothing at all.
+    """
+    import config
+
+    credit_id = await _issue_credit(app_client, admin_token, make_user, "MNT-SWITCH")
+    await _mint(app_client, admin_token, credit_id)
+    v1_address = (await _credit(credit_id))["contract_address"]
+
+    monkeypatch.setattr(config, "CONTRACT_ADDRESS", V2_ADDRESS)
+    monkeypatch.setattr(config, "CONTRACT_VERSION", 2)
+    monkeypatch.setattr(chain, "contract", chain.contract_at(V2_ADDRESS))
+
+    reads = []
+
+    async def fake_get_credit(on_chain_id, address=None):
+        reads.append(address)
+        return None
+
+    monkeypatch.setattr(chain, "get_credit", fake_get_credit)
+    await app_client.get(f"/verify/{credit_id}")
+    assert reads == [v1_address]
+
+    response = await app_client.post(
+        f"/retire/{credit_id}", params={"beneficiary": "Acme"}, headers=auth(admin_token))
+    assert response.status_code == 200, response.text
+    assert fake_chain.retirements[-1][2] == v1_address
+    # V1 has no beneficiary field; the API must not claim it went on-chain.
+    assert response.json()["beneficiary_on_chain"] is False
+
+    # New mints go to the new contract.
+    new_credit = await _issue_credit(app_client, admin_token, make_user, "MNT-SWITCH-NEW")
+    await _mint(app_client, admin_token, new_credit)
+    assert (await _credit(new_credit))["contract_address"].lower() == V2_ADDRESS
+
+
+def test_contract_versions_follow_the_address(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "CONTRACT_ADDRESS", V2_ADDRESS)
+    monkeypatch.setattr(config, "CONTRACT_VERSION", 2)
+    assert chain.version_at(V2_ADDRESS) == 2
+    assert chain.version_at(config.LEGACY_CONTRACT_ADDRESS) == 1
+
+
+async def test_credits_minted_before_the_column_existed_are_attributed_to_v1(app_client):
+    import config
+
+    row = await database.database.execute(
+        """INSERT INTO credits (credit_id, device_id, status, on_chain_id, tx_hash)
+           VALUES (880001, 'LEGACY', 'verified', 77, '0xabc')"""
+    )
+    await database._apply_schema()
+    record = await database.database.fetch_one(
+        "SELECT contract_address FROM credits WHERE id = :id", {"id": row})
+    assert record["contract_address"] == config.LEGACY_CONTRACT_ADDRESS

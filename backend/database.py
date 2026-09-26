@@ -190,8 +190,27 @@ CREATE TABLE IF NOT EXISTS credits (
     mint_claim TEXT,
     mint_claimed_at REAL,
     mint_tx_hash TEXT,
+    -- The contract this credit was (or is being) minted on. Credits stay on
+    -- the contract they were minted on when CONTRACT_ADDRESS moves on.
+    contract_address TEXT,
     retirement_beneficiary TEXT,
     retirement_purpose TEXT,
+    created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
+);
+
+-- How each sale's proceeds divide. Amounts are integer minor units (US cents,
+-- Indian paise) so every split adds back up to the price exactly.
+CREATE TABLE IF NOT EXISTS settlement_payouts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id INTEGER NOT NULL REFERENCES marketplace_transactions(id),
+    credit_row_id INTEGER NOT NULL REFERENCES credits(id),
+    payee TEXT NOT NULL CHECK (payee IN ('seller', 'treasury', 'reserve')),
+    payee_user_id INTEGER REFERENCES users(id),
+    share_bps INTEGER NOT NULL,
+    amount_usd_cents INTEGER NOT NULL,
+    amount_inr_paise INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'simulated'
+        CHECK (status IN ('simulated', 'owed', 'paid')),
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 
@@ -305,6 +324,8 @@ CREATE INDEX IF NOT EXISTS idx_readings_device_open
 CREATE INDEX IF NOT EXISTS idx_allocations_credit ON credit_allocations(credit_row_id);
 CREATE INDEX IF NOT EXISTS idx_allocations_reading ON credit_allocations(reading_row_id);
 CREATE INDEX IF NOT EXISTS idx_device_events_device ON device_events(device_id);
+CREATE INDEX IF NOT EXISTS idx_payouts_transaction ON settlement_payouts(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_payouts_payee ON settlement_payouts(payee, payee_user_id);
 """
 
 # Columns added after the initial release. SQLite has no "ADD COLUMN IF NOT
@@ -364,17 +385,24 @@ MIGRATIONS = {
         "mint_claim": "TEXT",
         "mint_claimed_at": "REAL",
         "mint_tx_hash": "TEXT",
+        "contract_address": "TEXT",
         "retirement_beneficiary": "TEXT",
         "retirement_purpose": "TEXT",
     },
 }
 
-# Data fixes that accompany the column migrations. Each is idempotent.
+# Data fixes that accompany the column migrations, as (sql, params). Each is
+# idempotent.
 DATA_MIGRATIONS = (
     # Readings consumed under the old whole-reading model were fully assigned
     # to their credit; record that in the allocation column.
-    """UPDATE generation_readings SET allocated_kg = co2_avoided_kg
-       WHERE consumed_by_credit_id IS NOT NULL AND allocated_kg = 0""",
+    ("""UPDATE generation_readings SET allocated_kg = co2_avoided_kg
+        WHERE consumed_by_credit_id IS NOT NULL AND allocated_kg = 0""", ()),
+    # Everything minted before credits recorded their contract was minted on
+    # the original V1 deployment.
+    ("""UPDATE credits SET contract_address = ?
+        WHERE on_chain_id IS NOT NULL AND contract_address IS NULL""",
+     (config.LEGACY_CONTRACT_ADDRESS,)),
 )
 
 
@@ -429,8 +457,8 @@ async def _apply_schema():
                     await raw_db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
                     print(f"✓ Added column {table}.{column}")
 
-        for statement in DATA_MIGRATIONS:
-            await raw_db.execute(statement)
+        for statement, params in DATA_MIGRATIONS:
+            await raw_db.execute(statement, params)
 
         # Only now that every column exists can the indexes reference them.
         await raw_db.executescript(INDEXES_SQL)
@@ -904,14 +932,18 @@ async def _seed_demo_data():
     # literal % in a LIKE pattern raises at execution time.
     await database.execute(
         query="""UPDATE users SET wallet_address = :addr
-                 WHERE email = :email
+                 WHERE email = :email AND lower(wallet_address) != lower(:addr)
                    AND (wallet_address LIKE :placeholder
-                        OR lower(wallet_address) = lower(:contract))""",
+                        OR lower(wallet_address) = lower(:contract)
+                        OR lower(wallet_address) = lower(:legacy)
+                        OR lower(wallet_address) = lower(:uncustodied))""",
         values={
             "addr": config.DEMO_INSTALLER_WALLET,
             "email": config.DEMO_INSTALLER_EMAIL,
             "placeholder": "0xDemo%",
             "contract": config.CONTRACT_ADDRESS,
+            "legacy": config.LEGACY_CONTRACT_ADDRESS,
+            "uncustodied": config.DEMO_UNCUSTODIED_WALLET,
         },
     )
 

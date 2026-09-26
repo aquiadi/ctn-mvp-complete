@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 import config
+import settlement
 from auth import get_current_user, require_buyer
 from database import database
 
@@ -189,7 +190,7 @@ async def finalize_purchase(req: PurchaseRequest, user: dict = Depends(require_b
 
     async with database.transaction():
         held = await database.fetch_all(
-            query=f"""SELECT id, credit_id FROM credits
+            query=f"""SELECT id, credit_id, owner_user_id FROM credits
                       WHERE id IN ({placeholders})
                         AND status = 'reserved'
                         AND reserved_by = :buyer_id
@@ -230,10 +231,15 @@ async def finalize_purchase(req: PurchaseRequest, user: dict = Depends(require_b
             },
         )
 
+        # Recorded in the same transaction as the sale, so a sale can never
+        # exist without its split or the reverse.
+        split = await settlement.record_sale(transaction_id, [dict(row) for row in held])
+
     return {
         "status": "purchased",
         "transaction_id": transaction_id,
         **pricing,
+        "settlement": split,
         "payment_method": "simulated",
         "payment_note": "SIMULATED — no real payment was processed. This is a testnet MVP.",
         "credits_purchased": [row["credit_id"] for row in held],

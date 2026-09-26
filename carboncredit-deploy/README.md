@@ -14,6 +14,7 @@ carries the evidence; neither makes the accounting official.
 |---|---|---|
 | `CarbonCredit.sol` | Deployed on Amoy at `0x1b4F5A7CEf1c2CFb914A5642CC82F887AB0C7Cf6` | V1. Plain struct registry, single owner key, no guard against minting the same certificate twice. Kept unchanged because it is what the live deployment runs. |
 | `CarbonCreditV2.sol` | Ready to deploy | ERC-721 (`CTN-IR`), one token per certificate, retirement records a beneficiary, retired tokens are frozen, two-step ownership for handing control to a multisig. |
+| `CTNSettlement.sol` | Ready to deploy | Splits each payment 70/20/10 between the seller, treasury, and reserve (fixed at deploy). Pull payments: `settle()` credits balances, `withdraw()` pays them out. Rounding goes to the reserve, so shares always sum to the payment. |
 
 V2 keeps V1's `mintCredit`, `getCredit`, `totalCredits`, `owner`, and
 `CreditMinted` interface, so the API reads and mints against either. Only
@@ -30,13 +31,20 @@ REPORT_GAS=1 npx hardhat test
 npx hardhat coverage
 ```
 
-## Deploy V2 to Amoy
+## Deploy to Amoy
+
+The easy way is the **Deploy contracts** GitHub Action (see the main README).
+Locally:
 
 ```bash
-PRIVATE_KEY=0x…  npx hardhat run scripts/deploy.js --network amoy
-# optional: CTN_OWNER=0x… to set an owner other than the deployer
-npx hardhat verify --network amoy <address> <owner>
+PRIVATE_KEY=0x… TREASURY_ADDRESS=0x… RESERVE_ADDRESS=0x… \
+  npx hardhat run scripts/deploy.js --network amoy
 ```
+
+The script checks the chain id and the deployer's balance first. It writes
+`deployments/amoy.json` with addresses, transactions, and constructor
+arguments. The owner defaults to the deployer; set `CTN_OWNER` to change it.
+The owner must be the API's signing wallet, or the API cannot mint.
 
 Then set `CONTRACT_ADDRESS=<address>` and `CONTRACT_VERSION=2` on the API, and
 fund the API's signing wallet with test POL.

@@ -7,6 +7,7 @@ this module rather than redeclaring constants in route files.
 """
 
 import os
+import re
 
 
 def _float(name: str, default: float) -> float:
@@ -127,6 +128,16 @@ USD_TO_INR = _float("USD_TO_INR", 83.0)
 CREDIT_VALUE_INR = CREDIT_VALUE_USD * USD_TO_INR
 
 
+# ── Settlement split ───────────────────────────────────────────────────────
+
+# How each sale's proceeds divide, in basis points (1/100 of a percent): the
+# generator who produced the credit, the CTN treasury, and an operational
+# reserve. The same split is fixed into the CTNSettlement contract at deploy.
+SPLIT_SELLER_BPS = _int("SPLIT_SELLER_BPS", 7000)
+SPLIT_TREASURY_BPS = _int("SPLIT_TREASURY_BPS", 2000)
+SPLIT_RESERVE_BPS = _int("SPLIT_RESERVE_BPS", 1000)
+
+
 # ── Marketplace ────────────────────────────────────────────────────────────
 
 # Minimum credits an installer must list in a single batch.
@@ -140,7 +151,13 @@ RESERVATION_CLEANUP_INTERVAL_SECONDS = _int("RESERVATION_CLEANUP_INTERVAL_SECOND
 
 # ── Blockchain ─────────────────────────────────────────────────────────────
 
-CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS", "0x1b4F5A7CEf1c2CFb914A5642CC82F887AB0C7Cf6")
+# The V1 contract every credit minted before any switch lives on. Credits
+# remember the contract they were minted on, so pointing CONTRACT_ADDRESS at a
+# new deployment only changes where new mints go.
+LEGACY_CONTRACT_ADDRESS = os.getenv(
+    "LEGACY_CONTRACT_ADDRESS", "0x1b4F5A7CEf1c2CFb914A5642CC82F887AB0C7Cf6"
+)
+CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS", LEGACY_CONTRACT_ADDRESS)
 AMOY_RPC = os.getenv("AMOY_RPC", "https://polygon-amoy-bor-rpc.publicnode.com")
 EXPLORER = os.getenv("EXPLORER", "https://amoy.polygonscan.com")
 
@@ -259,7 +276,15 @@ def _custody_address() -> str | None:
         return None
 
 
-DEMO_INSTALLER_WALLET = os.getenv("DEMO_INSTALLER_WALLET") or _custody_address()
+# Without a signing key nothing can be minted, but the demo account still
+# needs an address to list credits in the marketplace. This one is used only
+# then, and startup replaces it with the custody wallet once a key is set, so no
+# credit can ever be minted to it.
+DEMO_UNCUSTODIED_WALLET = "0x000000000000000000000000000000000000C7a0"
+
+DEMO_INSTALLER_WALLET = (
+    os.getenv("DEMO_INSTALLER_WALLET") or _custody_address() or DEMO_UNCUSTODIED_WALLET
+)
 SEED_DEMO_DATA = _bool("SEED_DEMO_DATA", not IS_PRODUCTION)
 
 
@@ -292,6 +317,18 @@ def validate() -> list[str]:
     Check configuration coherence. Returns warnings for development, but raises
     on anything that would be a security defect in production.
     """
+    # A split that does not add up would create or destroy money on every
+    # sale, in any environment, so it is fatal everywhere.
+    split = (SPLIT_SELLER_BPS, SPLIT_TREASURY_BPS, SPLIT_RESERVE_BPS)
+    if sum(split) != 10_000 or min(split) < 0:
+        raise ConfigError(
+            f"Settlement split must be non-negative and total 10000 bps; got {split}."
+        )
+    for name, address in (("CONTRACT_ADDRESS", CONTRACT_ADDRESS),
+                          ("LEGACY_CONTRACT_ADDRESS", LEGACY_CONTRACT_ADDRESS)):
+        if not re.fullmatch(r"0x[0-9a-fA-F]{40}", address or ""):
+            raise ConfigError(f"{name} is not a 0x-prefixed 20-byte address: {address!r}")
+
     problems: list[str] = []
 
     if not JWT_SECRET:

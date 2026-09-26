@@ -262,15 +262,18 @@
       document.getElementById('nav-user').textContent = user.email;
 
       try {
-        const [settings, dashboard, credits, readings] = await Promise.all([
+        const [settings, dashboard, credits, readings, earnings] = await Promise.all([
           CTN.settings(),
           CTN.get('/api/installer/dashboard'),
           CTN.get(`/api/installer/credits?page=1&limit=${PAGE_SIZE}`),
           CTN.get(`/api/installer/readings?page=1&limit=${PAGE_SIZE}`),
+          // Older API builds have no earnings endpoint; the tile just stays empty.
+          CTN.get('/api/installer/earnings').catch(() => null),
         ]);
 
         state.settings = settings;
         state.dashboard = dashboard;
+        state.earnings = earnings;
         state.credits = { data: credits, page: 1 };
         state.readings = { data: readings, page: 1 };
 
@@ -350,6 +353,11 @@
             <div class="stat-label">Estimated value</div>
             <div class="stat-value amber">${CTN.fmt.inr(stats.value_inr)}</div>
             <div class="stat-unit">${CTN.fmt.usd(stats.value_usd)} USD</div>
+            ${state.earnings && state.earnings.credits_sold ? `
+              <div class="stat-unit" title="Payments are simulated in this MVP">
+                Your ${state.earnings.share_bps / 100}% of ${CTN.fmt.number(state.earnings.credits_sold)} sold:
+                ${CTN.fmt.inr(state.earnings.inr)} (simulated)
+              </div>` : ''}
           </div>
         </div>`;
 

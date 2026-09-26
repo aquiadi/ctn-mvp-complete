@@ -1,0 +1,104 @@
+name: Deploy contracts
+
+# Manual only. Deploys CarbonCreditV2 and (optionally) CTNSettlement to Polygon
+# Amoy from this repository, after running the contract tests.
+#
+# One-time setup, in GitHub → Settings → Secrets and variables → Actions:
+#   DEPLOYER_PRIVATE_KEY   required. Use the same key as the API's PRIVATE_KEY,
+#                          so the API wallet owns V2 and can mint on it. It
+#                          needs test POL for gas.
+#   AMOY_RPC               optional. Defaults to the public Amoy RPC.
+#   POLYGONSCAN_API_KEY    optional. Enables source verification.
+#
+# Then Actions → Deploy contracts → Run workflow. Deploying changes nothing on
+# the live API: it keeps minting on the old contract until you set
+# CONTRACT_ADDRESS and CONTRACT_VERSION=2 on it, as the run summary shows.
+
+on:
+  workflow_dispatch:
+    inputs:
+      treasury:
+        description: "Treasury address for CTNSettlement (leave empty to skip the splitter)"
+        required: false
+        default: ""
+      reserve:
+        description: "Reserve address for CTNSettlement"
+        required: false
+        default: ""
+      owner:
+        description: "Owner of both contracts (defaults to the deployer)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-contracts
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Test and deploy to Polygon Amoy
+    runs-on: ubuntu-latest
+    environment: amoy
+    env:
+      POLYGONSCAN_API_KEY: ${{ secrets.POLYGONSCAN_API_KEY }}
+    defaults:
+      run:
+        working-directory: carboncredit-deploy
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: carboncredit-deploy/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npx hardhat test
+
+      - name: Check the deployer key is configured
+        env:
+          PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+        run: |
+          if [ -z "$PRIVATE_KEY" ]; then
+            echo "::error::Add the DEPLOYER_PRIVATE_KEY secret (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+
+      - name: Deploy
+        env:
+          PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          AMOY_RPC: ${{ secrets.AMOY_RPC }}
+          CTN_OWNER: ${{ inputs.owner }}
+          TREASURY_ADDRESS: ${{ inputs.treasury }}
+          RESERVE_ADDRESS: ${{ inputs.reserve }}
+        run: npx hardhat run scripts/deploy.js --network amoy
+
+      - name: Verify source on Polygonscan
+        if: ${{ env.POLYGONSCAN_API_KEY != '' }}
+        continue-on-error: true
+        env:
+          PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          AMOY_RPC: ${{ secrets.AMOY_RPC }}
+        run: |
+          node -e '
+            const d = require("./deployments/amoy.json");
+            for (const [name, c] of Object.entries(d.contracts)) {
+              console.log([c.address, ...c.args].join(" "));
+            }
+          ' | while read -r address args; do
+            npx hardhat verify --network amoy $address $args || true
+          done
+
+      - name: Keep the deployment record
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-amoy
+          path: carboncredit-deploy/deployments/amoy.json
+          retention-days: 90

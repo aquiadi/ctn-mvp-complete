@@ -294,7 +294,11 @@ quietly equated with a signed reading.
    exactly one broadcast. The on-chain id is read from the mint's own
    `CreditMinted` event, and a mint whose confirmation was lost is resolved
    through `/mint/{id}/reconcile`, not repeated.
-6. **Trade.** The installer lists it; a buyer reserves and purchases it.
+6. **Trade.** The installer lists it; a buyer reserves and purchases it. The
+   sale is split 70/20/10 between the generator, the treasury, and the
+   reserve, in integer paise and cents so the parts add back to the price
+   exactly. It is recorded in `settlement_payouts` in the same transaction as
+   the sale.
 7. **Retire.** An admin retires it on-chain for a named beneficiary, or for a
    sold credit the buyer's account number (never an email). A listed or
    reserved credit cannot be retired out from under a sale.
@@ -613,6 +617,27 @@ silently running insecure.
 | `DATABASE_URL` | Must point inside a mounted volume — see below |
 | `PRIVATE_KEY` | Optional; enables minting and retirement |
 | `CONTRACT_VERSION` | `1` for the deployed contract; `2` after deploying CarbonCreditV2 and updating `CONTRACT_ADDRESS` |
+| `SPLIT_*_BPS` | Settlement split, default 7000/2000/1000; must total 10000 |
+
+### Deploying the V2 contracts
+
+From GitHub, with no local setup:
+
+1. **Add the key.** In Settings → Secrets and variables → Actions, add
+   `DEPLOYER_PRIVATE_KEY`. Use the same key as the API's `PRIVATE_KEY`, so the
+   API wallet owns the new contract, and make sure it holds test POL.
+   `AMOY_RPC` and `POLYGONSCAN_API_KEY` are optional.
+2. **Run the workflow.** Actions → **Deploy contracts** → Run workflow. Give it
+   treasury and reserve addresses to also deploy `CTNSettlement`. It runs the
+   contract tests, deploys, verifies the source if a Polygonscan key is set,
+   and prints the addresses in the run summary.
+3. **Point the API at it.** On Railway, set `CONTRACT_ADDRESS` to the new
+   address and `CONTRACT_VERSION=2`, then redeploy.
+
+Nothing changes until step 3: deploying alone leaves the API minting on V1.
+After the switch, credits already minted stay on V1. Each credit records the
+contract it was minted on, so they remain verifiable and retirable there,
+while new mints go to V2.
 | `PINATA_API_KEY` / `PINATA_SECRET` | Optional; enables real IPFS pinning |
 
 ### Persistent storage
@@ -686,7 +711,7 @@ implying the strongest.
 | Could this reading be physically true? | Capacity, timestamp, and meter-continuity rules | Whether a plausible number is the right one |
 | Does it look like this device's normal output? | Anomaly screening, then a person | Anything, on its own — it only flags |
 | Is this device a genuine installation, still sealed? | An operator confirming it; the tamper counter | Anything cryptographic |
-| Has this credit been double-counted? | Exact allocations, monotonic sequences and meter counter, one mint per credit (V2: one token per certificate on-chain) | — |
+| Has this credit been double-counted? | Exact allocations, monotonic sequences and meter counter, one mint per credit, and on V2 one token per certificate enforced on-chain | — |
 | Does the ledger match the chain? | `/verify/{id}` compares both | Whether the input was honest |
 | Is the methodology sound? | Nothing here — see limitations | — |
 
@@ -728,10 +753,10 @@ state, but not a production carbon registry.
   dataset, not CTN sensors; see [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md).
 - **Device keys sit in unencrypted NVS** unless flash encryption is enabled.
   A secure element is the real fix.
-- **V2 contract not yet deployed.** The live contract is V1, which has no
-  on-chain guard against minting one certificate twice (the API enforces it).
-- **No payment split.** The 70/20/10 settlement split in the design is not
-  implemented.
+- **Payments are simulated, so the split moves no money.** Every sale records
+  its 70/20/10 division exactly, and `CTNSettlement` applies the same split to
+  real on-chain payments, but the marketplace does not take payment through it
+  yet. Wiring a payment rail (on-chain checkout or a processor) is what remains.
 
 ---
 

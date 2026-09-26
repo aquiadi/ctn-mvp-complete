@@ -192,6 +192,14 @@ async def installer_dashboard(user: dict = Depends(require_installer)):
     }
 
 
+@router.get("/earnings")
+async def installer_earnings(user: dict = Depends(require_installer)):
+    """This seller's share of every sale of their credits."""
+    import settlement
+
+    return await settlement.seller_earnings(user["id"])
+
+
 @router.get("/credits")
 async def installer_credits(
     page: int = 1,

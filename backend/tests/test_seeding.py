@@ -58,8 +58,53 @@ async def test_the_seeded_demo_wallet_is_a_valid_address(app_client):
     """A placeholder that merely looks like an address reverts the mint call."""
     from web3 import Web3
 
-    if config.DEMO_INSTALLER_WALLET is not None:
-        assert Web3.to_checksum_address(config.DEMO_INSTALLER_WALLET)
+    assert Web3.to_checksum_address(config.DEMO_INSTALLER_WALLET)
+
+
+async def test_the_demo_account_can_list_without_a_signing_key(app_client):
+    """
+    Regression test.
+
+    With no signing key the demo installer was left without a wallet, and the
+    marketplace refuses listings from accounts without one.
+    """
+    assert config.PRIVATE_KEY == ""
+    assert config.DEMO_INSTALLER_WALLET == config.DEMO_UNCUSTODIED_WALLET
+
+
+async def test_the_placeholder_is_replaced_once_there_is_custody(app_client, monkeypatch):
+    email = "seed-custody@test.local"
+    # Wallets are unique; an earlier test in this session may hold the placeholder.
+    await database.database.execute(
+        "UPDATE users SET wallet_address = NULL WHERE wallet_address = :w",
+        {"w": config.DEMO_UNCUSTODIED_WALLET},
+    )
+    await database._seed_user(email, "seed-password-123", "installer",
+                              wallet_address=config.DEMO_UNCUSTODIED_WALLET)
+    custody = "0x" + "ab" * 20
+    monkeypatch.setattr(config, "DEMO_INSTALLER_EMAIL", email)
+    monkeypatch.setattr(config, "DEMO_INSTALLER_WALLET", custody)
+    monkeypatch.setattr(config, "SEED_DEMO_DATA", True)
+    monkeypatch.setattr(database, "sync_readings_from_ipfs", _no_sync)
+
+    await database._seed_demo_data()
+    row = await database.database.fetch_one(
+        "SELECT wallet_address FROM users WHERE email = :e", {"e": email})
+    assert row["wallet_address"] == custody
+
+
+async def _no_sync(owner_user_id):
+    return None
+
+
+async def test_credits_cannot_be_minted_to_the_placeholder(app_client, admin_token, monkeypatch):
+    import chain
+    from tests.conftest import auth
+
+    monkeypatch.setattr(chain, "is_configured", lambda: True)
+    response = await app_client.post(
+        f"/mint/1?recipient={config.DEMO_UNCUSTODIED_WALLET}", headers=auth(admin_token))
+    assert response.status_code == 400
 
 
 async def test_the_demo_wallet_is_never_the_contract_itself(app_client):

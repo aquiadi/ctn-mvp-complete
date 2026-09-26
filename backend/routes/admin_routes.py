@@ -550,6 +550,16 @@ async def verify_device(
     }
 
 
+# ── Settlement ─────────────────────────────────────────────────────────────
+
+@router.get("/settlements")
+async def settlements(admin: dict = Depends(require_admin)):
+    """Proceeds per payee (seller, treasury, reserve) and each seller's share."""
+    import settlement
+
+    return await settlement.summary()
+
+
 # ── Review holds and device events ────────────────────────────────────────
 
 @router.get("/review-queue")

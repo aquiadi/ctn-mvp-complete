@@ -256,6 +256,17 @@
       <div class="page-header"><p class="page-label">Marketplace</p><h1>Transactions</h1></div>
       <div class="card">
         <div class="card-header">
+          <div class="card-title">Settlement split</div>
+          <div class="page-info" id="settlement-split"></div>
+        </div>
+        <p class="form-help">
+          Every sale divides between the generator, the CTN treasury, and the operational
+          reserve. Payments are simulated, so these are recorded obligations, not transfers.
+        </p>
+        <div id="settlement-list"><div class="empty-note">Loading...</div></div>
+      </div>
+      <div class="card">
+        <div class="card-header">
           <div class="card-title">Completed purchases</div>
           <div class="page-info" id="transactions-page-info"></div>
         </div>
@@ -297,7 +308,7 @@
       buyers: loadBuyers,
       credits: () => loadCredits(1),
       devices: () => { loadDeviceRequests(); loadHolds(); loadDevices(); },
-      transactions: () => loadTransactions(1),
+      transactions: () => { loadSettlements(); loadTransactions(1); },
       audit: () => loadAudit(1),
       health: loadHealth,
     };
@@ -757,6 +768,31 @@
     }
 
     // ── Transactions ──
+
+    async function loadSettlements() {
+      const list = document.getElementById('settlement-list');
+      try {
+        const data = await CTN.get('/api/admin/settlements');
+        const bps = data.split_bps;
+        document.getElementById('settlement-split').textContent =
+          `${bps.seller / 100} / ${bps.treasury / 100} / ${bps.reserve / 100} %`;
+        const byPayee = Object.fromEntries(data.totals.map(t => [t.payee, t]));
+        list.innerHTML = data.totals.length ? `
+          <div class="table-row cols-hold header">
+            <div>Payee</div><div>Share</div><div>Total (INR)</div><div>Total (USD)</div>
+          </div>
+          ${['seller', 'treasury', 'reserve'].map(p => `
+            <div class="table-row cols-hold">
+              <div>${p === 'seller' ? 'Generators' : p[0].toUpperCase() + p.slice(1)}</div>
+              <div>${bps[p] / 100}%</div>
+              <div>${CTN.fmt.inr(byPayee[p]?.inr || 0)}</div>
+              <div>${CTN.fmt.usd(byPayee[p]?.usd || 0)}</div>
+            </div>`).join('')}`
+          : '<div class="empty-note">No sales yet.</div>';
+      } catch (e) {
+        list.innerHTML = `<div class="empty-note">${esc(e.message)}</div>`;
+      }
+    }
 
     async function loadTransactions(page) {
       if (page < 1) return;

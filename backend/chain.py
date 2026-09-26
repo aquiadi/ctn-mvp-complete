@@ -139,6 +139,33 @@ contract = w3.eth.contract(
     address=Web3.to_checksum_address(config.CONTRACT_ADDRESS), abi=ABI
 )
 
+_contracts = {contract.address.lower(): contract}
+
+
+def contract_at(address: Optional[str] = None):
+    """
+    The contract at `address`, or the current one.
+
+    Credits are read and retired on the contract they were minted on, which is
+    not necessarily the one new mints go to.
+    """
+    if not address:
+        return contract
+    key = address.lower()
+    if key not in _contracts:
+        _contracts[key] = w3.eth.contract(address=Web3.to_checksum_address(address), abi=ABI)
+    return _contracts[key]
+
+
+def version_at(address: Optional[str] = None) -> int:
+    """
+    Interface version of the contract at `address`. CONTRACT_VERSION describes
+    the current contract; anything else is an earlier V1 deployment.
+    """
+    if not address or address.lower() == config.CONTRACT_ADDRESS.lower():
+        return config.CONTRACT_VERSION
+    return 1
+
 
 class ChainError(RuntimeError):
     """A contract call or transaction failed."""
@@ -226,7 +253,15 @@ def _broadcast(function_call, gas_limit: int) -> str:
             }
         )
         signed = w3.eth.account.sign_transaction(tx, config.PRIVATE_KEY)
-        return w3.eth.send_raw_transaction(signed.raw_transaction).to_0x_hex()
+        try:
+            return w3.eth.send_raw_transaction(signed.raw_transaction).to_0x_hex()
+        except Exception as exc:
+            # Some nodes execute the transaction on submission and refuse one
+            # that would revert, instead of mining the revert. Either way
+            # nothing changed on-chain, and callers should see the same error.
+            if "revert" in str(exc).lower():
+                raise ChainReverted(f"Transaction would revert: {exc}") from exc
+            raise
 
 
 def _await_receipt(tx_hash: str):
@@ -250,7 +285,9 @@ def _minted_id(receipt) -> int:
     then — another mint landing in between hands this credit someone else's id.
     """
     for event in contract.events.CreditMinted().process_receipt(receipt, errors=DISCARD):
-        if event.address.lower() == contract.address.lower():
+        # Any contract CTN has deployed emits the same event; take the one
+        # from the contract the transaction was sent to.
+        if event.address.lower() == (receipt["to"] or "").lower():
             return int(event.args.id)
     raise ChainError("Mint succeeded but emitted no CreditMinted event from this contract.")
 
@@ -286,23 +323,24 @@ def _lookup_mint(tx_hash: str) -> Optional[int]:
     return _minted_id(receipt)
 
 
-def _retire(on_chain_id: int, beneficiary: str) -> str:
+def _retire(on_chain_id: int, beneficiary: str, address: Optional[str]) -> str:
     # retireCredit() is holder-only. Credits minted into an installer's wallet
     # cannot be retired by the platform through it, so the owner-only
     # retireCreditFor() is used instead. V2 records the beneficiary on-chain.
-    if config.CONTRACT_VERSION >= 2:
-        call = contract.get_function_by_signature("retireCreditFor(uint256,string)")(
+    target = contract_at(address)
+    if version_at(address) >= 2:
+        call = target.get_function_by_signature("retireCreditFor(uint256,string)")(
             on_chain_id, beneficiary
         )
     else:
-        call = contract.get_function_by_signature("retireCreditFor(uint256)")(on_chain_id)
+        call = target.get_function_by_signature("retireCreditFor(uint256)")(on_chain_id)
     tx_hash = _broadcast(call, config.RETIRE_GAS_LIMIT)
     _await_receipt(tx_hash)
     return tx_hash
 
 
-def _get_credit(on_chain_id: int) -> Optional[dict]:
-    ipfs_hash, energy, co2, timestamp, retired, holder = contract.functions.getCredit(
+def _get_credit(on_chain_id: int, address: Optional[str] = None) -> Optional[dict]:
+    ipfs_hash, energy, co2, timestamp, retired, holder = contract_at(address).functions.getCredit(
         on_chain_id
     ).call()
 
@@ -330,6 +368,7 @@ def _health() -> dict:
         "contract_lifetime_credits": contract.functions.totalCredits().call(),
         "signing_configured": is_configured(),
         "contract_version": config.CONTRACT_VERSION,
+        "legacy_contract": config.LEGACY_CONTRACT_ADDRESS,
     }
 
     if is_configured():
@@ -360,14 +399,14 @@ async def lookup_mint(tx_hash: str) -> Optional[int]:
     return await asyncio.to_thread(_lookup_mint, tx_hash)
 
 
-async def retire(on_chain_id: int, beneficiary: str = "") -> str:
-    """Retire an on-chain credit. Returns the tx hash."""
-    return await asyncio.to_thread(_retire, on_chain_id, beneficiary)
+async def retire(on_chain_id: int, beneficiary: str = "", address: Optional[str] = None) -> str:
+    """Retire a credit on the contract it was minted on. Returns the tx hash."""
+    return await asyncio.to_thread(_retire, on_chain_id, beneficiary, address)
 
 
-async def get_credit(on_chain_id: int) -> Optional[dict]:
+async def get_credit(on_chain_id: int, address: Optional[str] = None) -> Optional[dict]:
     """Read one on-chain credit, or None if that slot was never minted."""
-    return await asyncio.to_thread(_get_credit, on_chain_id)
+    return await asyncio.to_thread(_get_credit, on_chain_id, address)
 
 
 async def health() -> dict:

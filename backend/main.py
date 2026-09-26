@@ -298,6 +298,11 @@ def public_config():
         "explorer": config.EXPLORER,
         "contract_explorer_url": chain.contract_url(),
         "chain_writes_enabled": chain.is_configured(),
+        "settlement_split_bps": {
+            "seller": config.SPLIT_SELLER_BPS,
+            "treasury": config.SPLIT_TREASURY_BPS,
+            "reserve": config.SPLIT_RESERVE_BPS,
+        },
     }
 
 
@@ -410,13 +415,15 @@ async def _claim_for_minting(credit_id: int) -> str:
     token = secrets.token_hex(16)
     now = time.time()
     await db_execute_with_retry(
-        query="""UPDATE credits SET mint_claim = :token, mint_claimed_at = :now
+        query="""UPDATE credits
+                 SET mint_claim = :token, mint_claimed_at = :now, contract_address = :contract
                  WHERE credit_id = :credit_id AND on_chain_id IS NULL
                    AND (mint_claim IS NULL
                         OR (mint_tx_hash IS NULL AND mint_claimed_at < :stale))""",
         values={
             "token": token,
             "now": now,
+            "contract": chain.contract.address,
             "credit_id": credit_id,
             "stale": now - config.MINT_CLAIM_TTL_SECONDS,
         },
@@ -438,7 +445,9 @@ async def _claim_for_minting(credit_id: int) -> str:
 
 async def _release_claim(credit_id: int, token: str) -> None:
     await db_execute_with_retry(
-        query="""UPDATE credits SET mint_claim = NULL, mint_claimed_at = NULL, mint_tx_hash = NULL
+        query="""UPDATE credits
+                 SET mint_claim = NULL, mint_claimed_at = NULL, mint_tx_hash = NULL,
+                     contract_address = NULL
                  WHERE credit_id = :credit_id AND mint_claim = :token""",
         values={"credit_id": credit_id, "token": token},
     )
@@ -514,6 +523,11 @@ async def mint_credit(
     """
     chain.require_configured()
     recipient_address = chain.parse_address(recipient)
+    if recipient_address.lower() in (
+        config.DEMO_UNCUSTODIED_WALLET.lower(), config.CONTRACT_ADDRESS.lower(),
+        config.LEGACY_CONTRACT_ADDRESS.lower(),
+    ):
+        raise HTTPException(400, "That address cannot hold credits. Choose a real wallet.")
     credit = await _load_credit(credit_id)
 
     if credit.get("on_chain_id"):
@@ -660,8 +674,12 @@ async def verify_on_chain(credit_id: int):
         response["detail"] = "Issued and certified, but not yet minted on-chain."
         return response
 
+    # Read from the contract this credit was minted on, which is not the
+    # current one if CONTRACT_ADDRESS has since moved to a new deployment.
+    minted_on = credit.get("contract_address") or config.LEGACY_CONTRACT_ADDRESS
+    response["contract_address"] = minted_on
     try:
-        record = await chain.get_credit(on_chain_id)
+        record = await chain.get_credit(on_chain_id, minted_on)
     except Exception as exc:
         response["chain_error"] = str(exc)
         return response
@@ -683,7 +701,7 @@ async def verify_on_chain(credit_id: int):
             "verify_ipfs": gateway_url(record["ipfs_hash"]),
             "tx_hash": credit.get("tx_hash"),
             "polygonscan": chain.tx_url(credit["tx_hash"]) if credit.get("tx_hash")
-                           else chain.contract_url(),
+                           else f"{config.EXPLORER}/address/{minted_on}",
             # The recorded quantities should equal what the database holds; a
             # mismatch means the two ledgers have diverged.
             "values_match": (
@@ -730,6 +748,8 @@ async def retire_credit(
     if not beneficiary and credit.get("buyer_user_id"):
         beneficiary = f"CTN buyer account #{credit['buyer_user_id']}"
     purpose = purpose.strip()[:200]
+    # Retire on the contract the credit was minted on.
+    minted_on = credit.get("contract_address") or config.LEGACY_CONTRACT_ADDRESS
 
     await log_admin_action(
         admin_id=admin["id"],
@@ -741,7 +761,7 @@ async def retire_credit(
     )
 
     try:
-        tx_hash = await chain.retire(credit["on_chain_id"], beneficiary)
+        tx_hash = await chain.retire(credit["on_chain_id"], beneficiary, minted_on)
     except chain.ChainError as exc:
         raise HTTPException(502, str(exc))
 
@@ -764,7 +784,8 @@ async def retire_credit(
         "credit_id": credit_id,
         "on_chain_id": credit["on_chain_id"],
         "beneficiary": beneficiary or None,
-        "beneficiary_on_chain": config.CONTRACT_VERSION >= 2,
+        "beneficiary_on_chain": chain.version_at(minted_on) >= 2,
+        "contract_address": minted_on,
         "tx_hash": tx_hash,
         "polygonscan": chain.tx_url(tx_hash),
         "message": "Credit permanently retired — the offset is now verified on-chain.",
