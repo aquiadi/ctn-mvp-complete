@@ -4,13 +4,20 @@ Polygon (Amoy) contract access.
 web3.py's HTTP provider is synchronous, so every call here is dispatched to a
 worker thread. Calling it directly from a coroutine would stall the event loop
 for the full round-trip — a signed transaction can take tens of seconds.
+
+Writes are split into broadcast and confirmation so the caller can persist a
+transaction hash before waiting on it. If the process dies in between, the hash
+is on record and the outcome can be reconciled rather than guessed at.
 """
 
 import asyncio
+import threading
 from typing import Optional
 
 from fastapi import HTTPException, status
 from web3 import Web3
+from web3.exceptions import TimeExhausted, TransactionNotFound
+from web3.logs import DISCARD
 
 import config
 
@@ -86,6 +93,17 @@ ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
+    # CarbonCreditV2 only: retirement records who the offset is claimed for.
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "id", "type": "uint256"},
+            {"internalType": "string", "name": "beneficiary", "type": "string"},
+        ],
+        "name": "retireCreditFor",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
     {
         "anonymous": False,
         "inputs": [
@@ -124,6 +142,20 @@ contract = w3.eth.contract(
 
 class ChainError(RuntimeError):
     """A contract call or transaction failed."""
+
+
+class ChainReverted(ChainError):
+    """The transaction was mined and reverted. Nothing changed on-chain."""
+
+
+class ChainPending(ChainError):
+    """The transaction was broadcast but no receipt arrived in time."""
+
+
+# One platform wallet signs everything. Nonces are allocated from the node's
+# pending count, which two concurrent sends would read identically; serialising
+# the build-sign-broadcast step is what keeps them distinct.
+_send_lock = threading.Lock()
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -180,44 +212,93 @@ def from_chain_units(value: int) -> float:
 
 # ── Blocking implementations ───────────────────────────────────────────────
 
-def _send(function_call, gas_limit: int) -> str:
-    """Sign, send, and await a transaction. Returns the hash, or raises."""
+def _broadcast(function_call, gas_limit: int) -> str:
+    """Sign and broadcast a transaction. Returns its hash without waiting."""
     account = signing_account()
-    tx = function_call.build_transaction(
-        {
-            "from": account.address,
-            "nonce": w3.eth.get_transaction_count(account.address),
-            "gas": gas_limit,
-            "gasPrice": w3.eth.gas_price,
-        }
-    )
-    signed = w3.eth.account.sign_transaction(tx, config.PRIVATE_KEY)
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-    receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+    with _send_lock:
+        tx = function_call.build_transaction(
+            {
+                "from": account.address,
+                "nonce": w3.eth.get_transaction_count(account.address, "pending"),
+                "gas": gas_limit,
+                "gasPrice": w3.eth.gas_price,
+                "chainId": w3.eth.chain_id,
+            }
+        )
+        signed = w3.eth.account.sign_transaction(tx, config.PRIVATE_KEY)
+        return w3.eth.send_raw_transaction(signed.raw_transaction).to_0x_hex()
 
-    tx_hex = tx_hash.hex()
+
+def _await_receipt(tx_hash: str):
+    """Wait for a receipt. Raises ChainReverted or ChainPending."""
+    try:
+        receipt = w3.eth.wait_for_transaction_receipt(
+            tx_hash, timeout=config.TX_RECEIPT_TIMEOUT_SECONDS
+        )
+    except TimeExhausted:
+        raise ChainPending(f"No receipt for {tx_url(tx_hash)} yet; it may still be mined.")
     if receipt.status == 0:
-        raise ChainError(f"Transaction reverted on-chain. See {tx_url(tx_hex)}")
-    return tx_hex
+        raise ChainReverted(f"Transaction reverted on-chain. See {tx_url(tx_hash)}")
+    return receipt
 
 
-def _mint(recipient: str, ipfs_hash: str, energy_kwh: float, co2_kg: float) -> dict:
-    tx_hex = _send(
+def _minted_id(receipt) -> int:
+    """
+    The credit id assigned by a mint, read from its own CreditMinted event.
+
+    Reading totalCredits() after the fact returns whatever the counter is by
+    then — another mint landing in between hands this credit someone else's id.
+    """
+    for event in contract.events.CreditMinted().process_receipt(receipt, errors=DISCARD):
+        if event.address.lower() == contract.address.lower():
+            return int(event.args.id)
+    raise ChainError("Mint succeeded but emitted no CreditMinted event from this contract.")
+
+
+def _broadcast_mint(recipient: str, ipfs_hash: str, energy_kwh: float, co2_kg: float) -> str:
+    return _broadcast(
         contract.functions.mintCredit(
             recipient, ipfs_hash, _to_chain_units(energy_kwh), _to_chain_units(co2_kg)
         ),
         config.MINT_GAS_LIMIT,
     )
-    # The contract assigns ids by incrementing totalCredits, so the value read
-    # back immediately after a confirmed mint is this credit's on-chain id.
-    return {"tx_hash": tx_hex, "on_chain_id": contract.functions.totalCredits().call()}
 
 
-def _retire(on_chain_id: int) -> str:
-    # retireCredit() is holder-only. Credits minted into a installer's wallet
+def _confirm_mint(tx_hash: str) -> int:
+    return _minted_id(_await_receipt(tx_hash))
+
+
+def _lookup_mint(tx_hash: str) -> Optional[int]:
+    """
+    Resolve a previously broadcast mint. Returns the id, None if the node has
+    never seen the transaction, or raises ChainReverted / ChainPending.
+    """
+    try:
+        receipt = w3.eth.get_transaction_receipt(tx_hash)
+    except TransactionNotFound:
+        try:
+            w3.eth.get_transaction(tx_hash)
+        except TransactionNotFound:
+            return None
+        raise ChainPending(f"{tx_url(tx_hash)} is known to the node but not yet mined.")
+    if receipt.status == 0:
+        raise ChainReverted(f"Transaction reverted on-chain. See {tx_url(tx_hash)}")
+    return _minted_id(receipt)
+
+
+def _retire(on_chain_id: int, beneficiary: str) -> str:
+    # retireCredit() is holder-only. Credits minted into an installer's wallet
     # cannot be retired by the platform through it, so the owner-only
-    # retireCreditFor() is used instead.
-    return _send(contract.functions.retireCreditFor(on_chain_id), config.RETIRE_GAS_LIMIT)
+    # retireCreditFor() is used instead. V2 records the beneficiary on-chain.
+    if config.CONTRACT_VERSION >= 2:
+        call = contract.get_function_by_signature("retireCreditFor(uint256,string)")(
+            on_chain_id, beneficiary
+        )
+    else:
+        call = contract.get_function_by_signature("retireCreditFor(uint256)")(on_chain_id)
+    tx_hash = _broadcast(call, config.RETIRE_GAS_LIMIT)
+    _await_receipt(tx_hash)
+    return tx_hash
 
 
 def _get_credit(on_chain_id: int) -> Optional[dict]:
@@ -248,6 +329,7 @@ def _health() -> dict:
         # minted by earlier deployments — not a count of this platform's mints.
         "contract_lifetime_credits": contract.functions.totalCredits().call(),
         "signing_configured": is_configured(),
+        "contract_version": config.CONTRACT_VERSION,
     }
 
     if is_configured():
@@ -263,14 +345,24 @@ def _health() -> dict:
 
 # ── Async interface ────────────────────────────────────────────────────────
 
-async def mint(recipient: str, ipfs_hash: str, energy_kwh: float, co2_kg: float) -> dict:
-    """Mint a credit to `recipient`. Returns its tx hash and on-chain id."""
-    return await asyncio.to_thread(_mint, recipient, ipfs_hash, energy_kwh, co2_kg)
+async def broadcast_mint(recipient: str, ipfs_hash: str, energy_kwh: float, co2_kg: float) -> str:
+    """Broadcast a mint to `recipient`. Returns the tx hash; does not wait."""
+    return await asyncio.to_thread(_broadcast_mint, recipient, ipfs_hash, energy_kwh, co2_kg)
 
 
-async def retire(on_chain_id: int) -> str:
+async def confirm_mint(tx_hash: str) -> int:
+    """Wait for a broadcast mint and return the on-chain id it was assigned."""
+    return await asyncio.to_thread(_confirm_mint, tx_hash)
+
+
+async def lookup_mint(tx_hash: str) -> Optional[int]:
+    """Resolve an earlier mint without waiting. See _lookup_mint."""
+    return await asyncio.to_thread(_lookup_mint, tx_hash)
+
+
+async def retire(on_chain_id: int, beneficiary: str = "") -> str:
     """Retire an on-chain credit. Returns the tx hash."""
-    return await asyncio.to_thread(_retire, on_chain_id)
+    return await asyncio.to_thread(_retire, on_chain_id, beneficiary)
 
 
 async def get_credit(on_chain_id: int) -> Optional[dict]:

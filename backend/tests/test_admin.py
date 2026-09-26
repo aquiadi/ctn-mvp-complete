@@ -64,8 +64,13 @@ async def test_health_separates_contract_total_from_platform_mints(app_client, a
     The contract counter is cumulative across every deployment that has used it,
     so a non-zero value there does not mean this platform minted anything.
     """
+    import database
+
     body = (await app_client.get("/api/admin/system-health", headers=auth(admin_token))).json()
-    assert body["minted_by_this_platform"] == 0
+    minted = await database.database.fetch_one(
+        "SELECT COUNT(*) AS n FROM credits WHERE on_chain_id IS NOT NULL"
+    )
+    assert body["minted_by_this_platform"] == minted["n"]
     assert "total_on_chain_credits" not in body
 
 

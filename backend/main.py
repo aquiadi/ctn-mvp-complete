@@ -5,7 +5,9 @@ Role-scoped functionality lives in the routers under `routes/`.
 """
 
 import asyncio
+import json
 import os
+import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -20,7 +22,13 @@ import chain
 import config
 from auth import require_admin
 from database import database, db_execute_with_retry, init_db, shutdown_db
-from ipfs_utils import gateway_url, upload_credit_to_ipfs
+from ipfs_utils import (
+    IPFSUploadError,
+    gateway_url,
+    pin_certificate,
+    pinning_configured,
+    upload_credit_to_ipfs,
+)
 from rate_limit import limiter
 from routes.admin_routes import log_admin_action
 from routes.admin_routes import router as admin_router
@@ -372,6 +380,120 @@ def compare_co2(kg_co2: float):
 
 # ── On-chain operations ────────────────────────────────────────────────────
 
+# A credit may be minted once its sale is possible: installation confirmed and
+# no review hold. Retired credits have already been claimed.
+MINTABLE_STATUSES = ("verified", "listed", "reserved", "sold")
+
+# Retiring a credit mid-sale would pull it out from under a buyer.
+RETIRABLE_STATUSES = ("verified", "sold")
+
+
+async def _load_credit(credit_id: int) -> dict:
+    row = await database.fetch_one(
+        "SELECT * FROM credits WHERE credit_id = :credit_id", {"credit_id": credit_id}
+    )
+    if not row:
+        raise HTTPException(404, f"Credit #{credit_id} not found")
+    return dict(row)
+
+
+async def _claim_for_minting(credit_id: int) -> str:
+    """
+    Take the credit's mint claim, or raise 409.
+
+    Two admin requests for the same credit both passed the old "not yet
+    minted" check and both broadcast, minting it twice. The claim is a guarded
+    UPDATE, so exactly one request wins. A claim abandoned before broadcasting
+    goes stale and can be taken over; one that did broadcast never is, because
+    that transaction may still land — it is resolved through /reconcile.
+    """
+    token = secrets.token_hex(16)
+    now = time.time()
+    await db_execute_with_retry(
+        query="""UPDATE credits SET mint_claim = :token, mint_claimed_at = :now
+                 WHERE credit_id = :credit_id AND on_chain_id IS NULL
+                   AND (mint_claim IS NULL
+                        OR (mint_tx_hash IS NULL AND mint_claimed_at < :stale))""",
+        values={
+            "token": token,
+            "now": now,
+            "credit_id": credit_id,
+            "stale": now - config.MINT_CLAIM_TTL_SECONDS,
+        },
+    )
+    row = await database.fetch_one(
+        "SELECT mint_claim, mint_tx_hash FROM credits WHERE credit_id = :credit_id",
+        {"credit_id": credit_id},
+    )
+    if row["mint_claim"] != token:
+        if row["mint_tx_hash"]:
+            raise HTTPException(
+                409,
+                f"Credit #{credit_id} already has a mint transaction "
+                f"({chain.tx_url(row['mint_tx_hash'])}). Reconcile it before retrying.",
+            )
+        raise HTTPException(409, f"Credit #{credit_id} is being minted by another request.")
+    return token
+
+
+async def _release_claim(credit_id: int, token: str) -> None:
+    await db_execute_with_retry(
+        query="""UPDATE credits SET mint_claim = NULL, mint_claimed_at = NULL, mint_tx_hash = NULL
+                 WHERE credit_id = :credit_id AND mint_claim = :token""",
+        values={"credit_id": credit_id, "token": token},
+    )
+
+
+async def _record_mint(credit_id: int, on_chain_id: int, tx_hash: str, ipfs_hash: str) -> None:
+    await db_execute_with_retry(
+        query="""UPDATE credits
+                 SET on_chain_id = :on_chain_id, tx_hash = :tx_hash, ipfs_hash = :ipfs_hash,
+                     minted_at = :now, mint_claim = NULL, mint_claimed_at = NULL
+                 WHERE credit_id = :credit_id""",
+        values={
+            "on_chain_id": on_chain_id,
+            "tx_hash": tx_hash,
+            "ipfs_hash": ipfs_hash,
+            "now": time.time(),
+            "credit_id": credit_id,
+        },
+    )
+
+
+async def _certificate_reference(credit: dict) -> str:
+    """
+    The certificate reference to write on-chain, pinning it first if possible.
+
+    Credits carry the exact certificate they were issued with, and that
+    document is what gets pinned. Credits issued before certificates were
+    stored fall back to their immutable fields.
+    """
+    ipfs_hash = credit.get("ipfs_hash") or ""
+    if ipfs_hash and not ipfs_hash.startswith("local-"):
+        return ipfs_hash
+
+    if credit.get("certificate"):
+        if not pinning_configured():
+            return ipfs_hash
+        try:
+            return await asyncio.to_thread(
+                pin_certificate, json.loads(credit["certificate"]), credit["credit_id"]
+            )
+        except IPFSUploadError as exc:
+            raise HTTPException(502, str(exc))
+
+    legacy = {
+        key: credit.get(key)
+        for key in ("credit_id", "device_id", "owner_user_id", "total_kwh", "co2_avoided_kg",
+                    "period_start", "period_end", "methodology", "standard", "location",
+                    "contributing_readings")
+    }
+    try:
+        return await asyncio.to_thread(upload_credit_to_ipfs, legacy)
+    except IPFSUploadError as exc:
+        raise HTTPException(502, str(exc))
+
+
 @app.post("/mint/{credit_id}")
 @limiter.limit(config.CHAIN_WRITE_RATE_LIMIT)
 async def mint_credit(
@@ -382,20 +504,17 @@ async def mint_credit(
     admin: dict = Depends(require_admin),
 ):
     """
-    Mint a verified credit onto the blockchain and record the result.
+    Mint a credit onto the blockchain and record the result.
 
-    The on-chain id, transaction hash, and certificate CID are persisted so
-    verification is a direct lookup rather than a scan of the whole contract.
+    Only credits that could be sold may be minted: a pending credit (device
+    unconfirmed, or held for review) stays off-chain until it is released.
+    The on-chain id is taken from the mint's own CreditMinted event, and the
+    transaction hash is persisted as soon as it is broadcast, so a crash
+    between broadcast and confirmation leaves something to reconcile.
     """
     chain.require_configured()
     recipient_address = chain.parse_address(recipient)
-
-    row = await database.fetch_one(
-        "SELECT * FROM credits WHERE credit_id = :credit_id", {"credit_id": credit_id}
-    )
-    if not row:
-        raise HTTPException(404, f"Credit #{credit_id} not found")
-    credit = dict(row)
+    credit = await _load_credit(credit_id)
 
     if credit.get("on_chain_id"):
         raise HTTPException(
@@ -403,7 +522,15 @@ async def mint_credit(
             f"Credit #{credit_id} is already on-chain as #{credit['on_chain_id']} "
             f"(tx {credit.get('tx_hash')}).",
         )
+    if credit.get("status") not in MINTABLE_STATUSES or credit.get("review_hold"):
+        raise HTTPException(
+            409,
+            f"Credit #{credit_id} is {credit.get('status')}"
+            + (f" ({credit['review_hold']})" if credit.get("review_hold") else "")
+            + ". Only released credits can be minted.",
+        )
 
+    token = await _claim_for_minting(credit_id)
     await log_admin_action(
         admin_id=admin["id"],
         action="mint",
@@ -413,45 +540,82 @@ async def mint_credit(
         details=f"recipient={recipient_address}",
     )
 
-    # Pin the certificate for this specific credit if issuance could not.
-    ipfs_hash = credit.get("ipfs_hash")
-    if not ipfs_hash or ipfs_hash.startswith("local-"):
-        ipfs_hash = upload_credit_to_ipfs(credit)
-
     try:
-        result = await chain.mint(
-            recipient_address,
-            ipfs_hash,
-            credit.get("total_kwh") or 0,
-            credit.get("co2_avoided_kg") or 0,
+        ipfs_hash = await _certificate_reference(credit)
+        tx_hash = await chain.broadcast_mint(
+            recipient_address, ipfs_hash, credit.get("total_kwh") or 0, credit.get("co2_avoided_kg") or 0
         )
-    except chain.ChainError as exc:
-        raise HTTPException(502, str(exc))
+    except HTTPException:
+        await _release_claim(credit_id, token)
+        raise
+    except Exception as exc:
+        await _release_claim(credit_id, token)
+        raise HTTPException(502, f"Mint was not broadcast: {exc}")
 
     await db_execute_with_retry(
-        query="""UPDATE credits
-                 SET on_chain_id = :on_chain_id, tx_hash = :tx_hash,
-                     ipfs_hash = :ipfs_hash, minted_at = :now
-                 WHERE credit_id = :credit_id""",
-        values={
-            "on_chain_id": result["on_chain_id"],
-            "tx_hash": result["tx_hash"],
-            "ipfs_hash": ipfs_hash,
-            "now": time.time(),
-            "credit_id": credit_id,
-        },
+        query="UPDATE credits SET mint_tx_hash = :tx, ipfs_hash = :cid WHERE credit_id = :credit_id",
+        values={"tx": tx_hash, "cid": ipfs_hash, "credit_id": credit_id},
     )
 
+    try:
+        on_chain_id = await chain.confirm_mint(tx_hash)
+    except chain.ChainReverted as exc:
+        await _release_claim(credit_id, token)
+        raise HTTPException(502, str(exc))
+    except chain.ChainError as exc:
+        # Broadcast but unconfirmed: keep the claim so nobody mints it again.
+        raise HTTPException(
+            504, f"{exc} Call POST /mint/{credit_id}/reconcile once it is mined."
+        )
+
+    await _record_mint(credit_id, on_chain_id, tx_hash, ipfs_hash)
     return {
         "status": "minted",
         "credit_id": credit_id,
-        "on_chain_id": result["on_chain_id"],
+        "on_chain_id": on_chain_id,
         "recipient": recipient_address,
         "ipfs_hash": ipfs_hash,
-        "tx_hash": result["tx_hash"],
-        "polygonscan": chain.tx_url(result["tx_hash"]),
+        "tx_hash": tx_hash,
+        "polygonscan": chain.tx_url(tx_hash),
         "verify_ipfs": gateway_url(ipfs_hash),
     }
+
+
+@app.post("/mint/{credit_id}/reconcile")
+async def reconcile_mint(credit_id: int, admin: dict = Depends(require_admin)):
+    """
+    Resolve a mint whose confirmation was never recorded.
+
+    Looks up the persisted transaction: if it was mined, the credit is recorded
+    with the id from its event; if it reverted or the network never saw it, the
+    claim is released so the mint can be retried safely.
+    """
+    credit = await _load_credit(credit_id)
+    if credit.get("on_chain_id"):
+        return {"status": "minted", "credit_id": credit_id, "on_chain_id": credit["on_chain_id"]}
+    tx_hash = credit.get("mint_tx_hash")
+    if not tx_hash:
+        raise HTTPException(409, f"Credit #{credit_id} has no mint transaction to reconcile.")
+
+    try:
+        on_chain_id = await chain.lookup_mint(tx_hash)
+    except chain.ChainReverted:
+        on_chain_id = None
+    except chain.ChainPending as exc:
+        raise HTTPException(409, str(exc))
+
+    if on_chain_id is None:
+        await _release_claim(credit_id, credit["mint_claim"])
+        outcome, detail = "released", "The transaction did not mint; the credit can be minted again."
+    else:
+        await _record_mint(credit_id, on_chain_id, tx_hash, credit["ipfs_hash"])
+        outcome, detail = "minted", f"Recorded as on-chain #{on_chain_id}."
+
+    await log_admin_action(
+        admin["id"], "reconcile_mint", "credit", str(credit_id), detail, f"tx={tx_hash}"
+    )
+    return {"status": outcome, "credit_id": credit_id, "on_chain_id": on_chain_id,
+            "tx_hash": tx_hash, "message": detail}
 
 
 @app.get("/verify/{credit_id}")
@@ -483,6 +647,12 @@ async def verify_on_chain(credit_id: int):
                   f"{str(credit.get('period_end') or '')[:10]}",
         "ipfs_master": config.IPFS_SEED_URL,
         "certificate_ipfs": gateway_url(credit.get("ipfs_hash")),
+        "certificate_schema": (
+            json.loads(credit["certificate"])["schema"] if credit.get("certificate") else None
+        ),
+        "review_hold": credit.get("review_hold"),
+        "retirement_beneficiary": credit.get("retirement_beneficiary"),
+        "retirement_purpose": credit.get("retirement_purpose"),
     }
 
     on_chain_id = credit.get("on_chain_id")
@@ -531,27 +701,35 @@ async def retire_credit(
     request: Request,
     credit_id: int,
     reason: str = "Admin retirement",
+    beneficiary: str = "",
+    purpose: str = "",
     admin: dict = Depends(require_admin),
 ):
     """
     Permanently retire a minted credit, completing the offset.
 
-    Addressed by the credit's on-chain id, not its database id — the contract
-    assigns its own sequence and the two do not correspond.
+    A retirement is a claim that this tonne offsets someone's emissions, so it
+    records who: the named beneficiary, or for a sold credit its buyer's
+    account number (never an email — this goes on a public chain). A credit
+    listed or reserved cannot be retired out from under a sale.
     """
     chain.require_configured()
-
-    row = await database.fetch_one(
-        "SELECT * FROM credits WHERE credit_id = :credit_id", {"credit_id": credit_id}
-    )
-    if not row:
-        raise HTTPException(404, f"Credit #{credit_id} not found")
-    credit = dict(row)
+    credit = await _load_credit(credit_id)
 
     if not credit.get("on_chain_id"):
         raise HTTPException(400, f"Credit #{credit_id} has not been minted on-chain yet.")
     if credit.get("status") == "retired":
         raise HTTPException(409, f"Credit #{credit_id} is already retired.")
+    if credit.get("status") not in RETIRABLE_STATUSES:
+        raise HTTPException(
+            409, f"Credit #{credit_id} is {credit.get('status')}; only unlisted or sold "
+                 "credits can be retired."
+        )
+
+    beneficiary = beneficiary.strip()[:200]
+    if not beneficiary and credit.get("buyer_user_id"):
+        beneficiary = f"CTN buyer account #{credit['buyer_user_id']}"
+    purpose = purpose.strip()[:200]
 
     await log_admin_action(
         admin_id=admin["id"],
@@ -559,25 +737,34 @@ async def retire_credit(
         target_type="credit",
         target_id=str(credit_id),
         reason=reason,
-        details=f"on_chain_id={credit['on_chain_id']}",
+        details=f"on_chain_id={credit['on_chain_id']} beneficiary={beneficiary or '-'}",
     )
 
     try:
-        tx_hash = await chain.retire(credit["on_chain_id"])
+        tx_hash = await chain.retire(credit["on_chain_id"], beneficiary)
     except chain.ChainError as exc:
         raise HTTPException(502, str(exc))
 
     await db_execute_with_retry(
         query="""UPDATE credits
-                 SET status = 'retired', retired_at = :now, retire_tx_hash = :tx_hash
+                 SET status = 'retired', retired_at = :now, retire_tx_hash = :tx_hash,
+                     retirement_beneficiary = :beneficiary, retirement_purpose = :purpose
                  WHERE credit_id = :credit_id""",
-        values={"now": time.time(), "tx_hash": tx_hash, "credit_id": credit_id},
+        values={
+            "now": time.time(),
+            "tx_hash": tx_hash,
+            "beneficiary": beneficiary or None,
+            "purpose": purpose or None,
+            "credit_id": credit_id,
+        },
     )
 
     return {
         "status": "retired",
         "credit_id": credit_id,
         "on_chain_id": credit["on_chain_id"],
+        "beneficiary": beneficiary or None,
+        "beneficiary_on_chain": config.CONTRACT_VERSION >= 2,
         "tx_hash": tx_hash,
         "polygonscan": chain.tx_url(tx_hash),
         "message": "Credit permanently retired — the offset is now verified on-chain.",

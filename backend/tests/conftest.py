@@ -35,6 +35,7 @@ os.environ.update(
         "SIGNUP_RATE_LIMIT": "1000/minute",
         "INGEST_RATE_LIMIT": "10000/minute",
         "ENROLL_RATE_LIMIT": "10000/minute",
+        "CHAIN_WRITE_RATE_LIMIT": "10000/minute",
         "PINATA_API_KEY": "",
         "PINATA_SECRET": "",
         # Functional tests issue whole credits from a handful of readings a
