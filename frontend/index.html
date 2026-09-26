@@ -977,10 +977,7 @@
             <div class="chain-dot"></div>
             <div>
               <div class="chain-label">Smart contract</div>
-              <div class="chain-value">
-                <a href="https://amoy.polygonscan.com/address/0x1b4F5A7CEf1c2CFb914A5642CC82F887AB0C7Cf6"
-                  target="_blank" rel="noopener">0x1b4F5A7CEf1c2C...0C7Cf6 ↗</a>
-              </div>
+              <div class="chain-value" id="proof-contract">Loading…</div>
             </div>
           </div>
           <div class="chain-row">
@@ -1318,6 +1315,16 @@
       var threshold = settings.sell_threshold;
       fill('[data-sell-threshold]',
         CTN.fmt.number(threshold) + ' verified credit' + (threshold === 1 ? '' : 's'));
+
+      // The contract comes from the API too, so moving to a new deployment is
+      // a config change and the page can never point at a retired contract.
+      const address = settings.contract_address || '';
+      const link = document.createElement('a');
+      link.href = settings.contract_explorer_url;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.textContent = `${address.slice(0, 16)}...${address.slice(-6)} ↗`;
+      document.getElementById('proof-contract').replaceChildren(link);
     }).catch(e => console.error('Could not load settings:', e));
 
     // ── Scroll-spy ──
