@@ -104,19 +104,22 @@ def load_device_state(device_id):
     device = load_device(device_id)
     device.setdefault("meter_wh", 0)
     device.setdefault("tamper_count", 0)
+    device.setdefault("last_epoch", 0)
     return device
 
 
-def save_device(device_id, private_key, address, sequence=0, meter_wh=0, tamper_count=0):
+def save_device(device_id, private_key, address, sequence=0, meter_wh=0, tamper_count=0,
+                last_epoch=0):
     KEY_DIR.mkdir(exist_ok=True)
     key_path(device_id).write_text(json.dumps(
         {"device_id": device_id, "private_key": private_key, "public_key": address,
-         "sequence": sequence, "meter_wh": meter_wh, "tamper_count": tamper_count}, indent=2))
+         "sequence": sequence, "meter_wh": meter_wh, "tamper_count": tamper_count,
+         "last_epoch": last_epoch}, indent=2))
 
 
 def save_state(device_id, device):
     save_device(device_id, device["private_key"], device["public_key"], device["sequence"],
-                device["meter_wh"], device["tamper_count"])
+                device["meter_wh"], device["tamper_count"], device["last_epoch"])
 
 
 def site(args):
@@ -208,10 +211,11 @@ def cmd_send(args):
     device = load_device_state(args.device)
     delta_wh = round(args.kwh * 1000)
     readings = []
-    last_epoch = 0
+    last_epoch = device["last_epoch"]
 
     for _ in range(args.count):
-        # Real time, strictly increasing: the server refuses anything else.
+        # Real time, strictly after the last reading signed, across runs too:
+        # the server refuses anything else.
         last_epoch = max(int(time.time()), last_epoch + 1)
         timestamp = datetime.fromtimestamp(last_epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         packet = reading(device, args.device, delta_wh, timestamp=timestamp)
@@ -227,6 +231,7 @@ def cmd_send(args):
         f"{args.api}/api/v1/readings", json={"readings": readings}, timeout=60))
 
     if response.status_code == 200:
+        device["last_epoch"] = last_epoch
         save_state(args.device, device)
     elif response.status_code == 409:
         print("\nThe server already has this sequence. Run `resync` and try again.")
@@ -312,9 +317,9 @@ def cmd_attack(args):
 
     # 5. Correctly signed, but claims more energy than the meter advanced.
     if device["meter_wh"] > 0:
-        # Dated just ahead so it is judged on energy, not on falling in the
-        # same second as the last accepted reading.
-        ahead = datetime.fromtimestamp(time.time() + 2, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Dated just after the last accepted reading so it is judged on energy.
+        after = max(time.time(), device["last_epoch"]) + 1
+        ahead = datetime.fromtimestamp(after, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         show("5. Energy that the meter counter does not account for",
              post([reading(device, args.device, 1000, timestamp=ahead,
                            meter_wh=device["meter_wh"] + 100)]))

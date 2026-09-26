@@ -85,7 +85,9 @@
     .notice-strip.warn { background: var(--amber-light); color: var(--amber); }
     .cols-7 { grid-template-columns: 0.7fr 1.4fr 1.4fr 0.9fr 0.9fr 0.9fr 1.1fr; }
     .cols-req { grid-template-columns: 1.2fr 1.6fr 1.1fr 1.4fr 1.3fr; }
-    .cols-dev { grid-template-columns: 1.3fr 1.6fr 1.3fr 0.8fr 0.8fr 0.8fr; }
+    .cols-dev { grid-template-columns: 1.2fr 1.5fr 1.1fr 0.7fr 0.6fr 0.6fr 0.7fr 0.6fr 1fr; }
+    .cols-hold { grid-template-columns: 0.6fr 1fr 2.6fr 1fr; }
+    .badge-held { background: #fff3e0; color: #b26a00; }
     .cols-txn { grid-template-columns: 0.6fr 1.6fr 0.8fr 1fr 1.4fr; }
     .link { color: var(--blue); text-decoration: none; }
     .link:hover { text-decoration: underline; }
@@ -205,6 +207,18 @@
 
       <div class="card">
         <div class="card-header">
+          <div class="card-title">Credits held for review</div>
+          <div class="page-info" id="holds-count"></div>
+        </div>
+        <p class="form-help">
+          Anomaly screening flagged a reading behind each of these. Look at the flags,
+          check the site or inverter logs, and release only what you can explain.
+        </p>
+        <div id="holds-list"><div class="empty-note">Loading...</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
           <div class="card-title">Registered devices</div>
           <div class="page-info" id="devices-count"></div>
         </div>
@@ -217,6 +231,7 @@
           <input id="device-id" class="input-sm" placeholder="Device ID">
           <input id="device-owner" class="input-sm" placeholder="Installer email">
           <input id="device-location" class="input-sm" placeholder="Location">
+          <input id="device-capacity" class="input-sm" type="number" min="0.1" step="0.1" placeholder="Capacity kW">
           <button class="btn-sm" onclick="registerDevice()">Register</button>
         </div>
         <div class="form-result" id="device-result"></div>
@@ -281,7 +296,7 @@
       installers: loadInstallers,
       buyers: loadBuyers,
       credits: () => loadCredits(1),
-      devices: () => { loadDeviceRequests(); loadDevices(); },
+      devices: () => { loadDeviceRequests(); loadHolds(); loadDevices(); },
       transactions: () => loadTransactions(1),
       audit: () => loadAudit(1),
       health: loadHealth,
@@ -456,12 +471,23 @@
               target="_blank" rel="noopener">#${c.on_chain_id} ↗</a>`
         : '<span style="color:var(--text3);">—</span>';
 
+      // Mirrors the server's gates, so the buttons offered are the ones that can succeed.
+      const mintable = ['verified', 'listed', 'reserved', 'sold'].includes(c.status) && !c.review_hold;
+      const retirable = ['verified', 'sold'].includes(c.status);
+
       const actions = [];
-      if (!c.on_chain_id) {
+      if (c.review_hold) {
+        actions.push(`<button class="btn-sm" onclick="showSection('devices')">Review</button>`);
+      } else if (!c.on_chain_id && c.mint_tx_hash) {
+        actions.push(`<button class="btn-sm" onclick="reconcileMint(${c.credit_id})">Reconcile</button>`);
+      } else if (!c.on_chain_id && mintable) {
         actions.push(`<button class="btn-sm" onclick="mintCredit(${c.credit_id}, '${esc(c.owner_wallet || '')}')">Mint</button>`);
-      } else if (c.status !== 'retired') {
+      } else if (c.on_chain_id && retirable) {
         actions.push(`<button class="btn-sm" onclick="retireCredit(${c.credit_id})">Retire</button>`);
       }
+      const statusBadge = c.review_hold
+        ? `<span class="badge badge-held" title="${esc(c.review_hold)}">held</span>`
+        : `<span class="badge badge-${esc(c.status)}">${esc(c.status)}</span>`;
 
       return `
         <div class="table-row cols-7">
@@ -469,7 +495,7 @@
           <div>${esc(c.owner_email || '—')}</div>
           <div style="font-size:10px;">${CTN.fmt.date(c.period_start)} → ${CTN.fmt.date(c.period_end)}</div>
           <div>${CTN.fmt.number(c.co2_avoided_kg)} kg</div>
-          <div><span class="badge badge-${esc(c.status)}">${esc(c.status)}</span></div>
+          <div>${statusBadge}</div>
           <div>${chainCell}</div>
           <div>${actions.join(' ') || '<span style="color:var(--text3);">—</span>'}</div>
         </div>`;
@@ -505,14 +531,29 @@
         return;
       }
 
+      const beneficiary = prompt(
+        'Who is this offset claimed for? (organisation name; leave blank to use the buyer account number)\n\n' +
+        'This is written to a public blockchain. Do not enter personal data.', '');
+      if (beneficiary === null) return;
+      const purpose = prompt('Purpose (e.g. "FY2026 Scope 2"), optional:', '');
+      if (purpose === null) return;
       const reason = prompt('Reason for retirement (recorded in the audit log):', 'Offset claimed by buyer');
       if (reason === null) return;
 
       if (!confirm(`Retire credit #${creditId}?\n\nThis is permanent and cannot be undone.`)) return;
 
+      const query = new URLSearchParams({ reason, beneficiary: beneficiary.trim(), purpose: purpose.trim() });
       await runChainAction(
-        `/retire/${creditId}?reason=${encodeURIComponent(reason)}`,
-        result => `Credit #${creditId} retired.\n\n${result.polygonscan}`
+        `/retire/${creditId}?${query}`,
+        result => `Credit #${creditId} retired` +
+          (result.beneficiary ? ` for ${result.beneficiary}` : '') + `.\n\n${result.polygonscan}`
+      );
+    }
+
+    async function reconcileMint(creditId) {
+      await runChainAction(
+        `/mint/${creditId}/reconcile`,
+        result => result.message || `Credit #${creditId}: ${result.status}.`
       );
     }
 
@@ -599,17 +640,22 @@
 
         list.innerHTML = data.devices.length ? `
           <div class="table-row cols-dev header">
-            <div>Device ID</div><div>Owner</div><div>Location</div>
-            <div>Readings</div><div>Credits</div><div>kWh</div>
+            <div>Device ID</div><div>Owner</div><div>Location</div><div>Capacity</div>
+            <div>Readings</div><div>Credits</div><div>kWh</div><div>Tamper</div><div>Installation</div>
           </div>
           ${data.devices.map(d => `
             <div class="table-row cols-dev">
               <div style="font-family:var(--mono);">${esc(d.device_id)}</div>
               <div>${esc(d.owner_email || '—')}</div>
               <div>${esc(d.location || '—')}</div>
+              <div>${d.rated_capacity_kw ? `${CTN.fmt.number(d.rated_capacity_kw)} kW` : '<span title="Held to the platform default">—</span>'}</div>
               <div>${CTN.fmt.number(d.reading_count)}</div>
               <div>${CTN.fmt.number(d.credit_count)}</div>
               <div>${CTN.fmt.number(d.total_kwh)}</div>
+              <div>${d.tamper_count ? `<span class="badge badge-held">${d.tamper_count}</span>` : '0'}</div>
+              <div>${d.verified
+                ? '<span class="badge badge-verified">confirmed</span>'
+                : `<button class="btn-sm" onclick="confirmInstallation('${esc(d.device_id)}')">Confirm</button>`}</div>
             </div>`).join('')}`
           : '<div class="empty-note">No devices registered yet. Add one below.</div>';
       } catch (e) {
@@ -617,10 +663,61 @@
       }
     }
 
+    async function confirmInstallation(deviceId) {
+      const note = prompt(
+        `How was ${deviceId}'s installation confirmed? (site visit, photos, inverter serial…)\n\n` +
+        'Confirming releases its pending credits for sale.', '');
+      if (note === null) return;
+      try {
+        const result = await CTN.post(`/api/admin/devices/${encodeURIComponent(deviceId)}/verify`, { note });
+        alert(result.message);
+        await Promise.all([loadDevices(), loadHolds()]);
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    async function loadHolds() {
+      const list = document.getElementById('holds-list');
+      try {
+        const data = await CTN.get('/api/admin/review-queue');
+        document.getElementById('holds-count').textContent = `${data.total} held`;
+        list.innerHTML = data.credits.length ? `
+          <div class="table-row cols-hold header">
+            <div>Credit</div><div>Device</div><div>Flags</div><div></div>
+          </div>
+          ${data.credits.map(c => `
+            <div class="table-row cols-hold">
+              <div style="font-family:var(--mono);">#${c.credit_id}</div>
+              <div style="font-family:var(--mono);">${esc(c.device_id)}</div>
+              <div style="font-size:11px;">${c.flagged_readings.flatMap(r => r.anomaly_flags.map(f =>
+                `<div><b>${esc(f.code)}</b> · ${esc(r.timestamp)} · ${esc(f.detail)}</div>`)).join('')}</div>
+              <div><button class="btn-sm" onclick="releaseHold(${c.credit_id})">Release</button></div>
+            </div>`).join('')}`
+          : '<div class="empty-note">Nothing held. Screening has not flagged any credit.</div>';
+      } catch (e) {
+        list.innerHTML = `<div class="empty-note">${esc(e.message)}</div>`;
+      }
+    }
+
+    async function releaseHold(creditId) {
+      const note = prompt(`What did you check before releasing credit #${creditId}?`, '');
+      if (note === null) return;
+      try {
+        const result = await CTN.post(`/api/admin/credits/${creditId}/release`, { note });
+        alert(result.message);
+        await loadHolds();
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
     async function registerDevice() {
       const device_id = document.getElementById('device-id').value.trim();
       const owner_email = document.getElementById('device-owner').value.trim();
       const location = document.getElementById('device-location').value.trim() || 'India';
+      const capacityRaw = document.getElementById('device-capacity').value.trim();
+      const rated_capacity_kw = capacityRaw === '' ? null : Number(capacityRaw);
 
       if (!device_id || !owner_email) {
         setResult('device-result', 'Device ID and installer email are both required.', false);
@@ -628,7 +725,7 @@
       }
 
       try {
-        const result = await CTN.post('/api/admin/devices', { device_id, owner_email, location });
+        const result = await CTN.post('/api/admin/devices', { device_id, owner_email, location, rated_capacity_kw });
         setResult('device-result',
           `Device ${result.device_id} registered to ${result.owner_email}.`, true);
         document.getElementById('device-id').value = '';

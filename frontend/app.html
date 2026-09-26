@@ -621,6 +621,17 @@
             <input id="new-device-label" placeholder="What are you naming it? (e.g. Rooftop)">
             <input id="new-device-location" placeholder="Where is it? (e.g. Nashik)">
           </div>
+          <div class="device-add-row">
+            <input id="new-device-capacity" type="number" min="0.1" step="0.1"
+                   placeholder="System size in kW (on the inverter label)">
+            <input id="new-device-lat" type="number" step="0.0001" placeholder="Latitude (optional)">
+            <input id="new-device-lon" type="number" step="0.0001" placeholder="Longitude (optional)">
+          </div>
+          <p class="panel-hint">
+            The system size caps how much energy any reading can claim, so a faulty
+            or tampered sensor cannot over-report. Coordinates let us spot readings
+            taken while the sun was down.
+          </p>
           <button class="btn-sell" style="margin-top:0.6rem;" onclick="generatePairingCode()">
             Get my code →
           </button>
@@ -780,9 +791,16 @@
       result.className = 'device-result';
 
       try {
+        const numberOrNull = id => {
+          const raw = document.getElementById(id).value.trim();
+          return raw === '' ? null : Number(raw);
+        };
         const response = await CTN.post('/api/installer/enrollment-codes', {
           label: document.getElementById('new-device-label').value.trim(),
           location: document.getElementById('new-device-location').value.trim() || 'India',
+          rated_capacity_kw: numberOrNull('new-device-capacity'),
+          latitude: numberOrNull('new-device-lat'),
+          longitude: numberOrNull('new-device-lon'),
         });
 
         result.textContent = '';
