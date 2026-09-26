@@ -1,30 +1,98 @@
+<div align="center">
+
 # CTN — Climate Trust Network
 
+**Signed IoT energy data → physically checked → one-tonne impact records on Polygon, with evidence anyone can verify offline.**
+
 [![CI](https://github.com/aquiadi/ctn-mvp-complete/actions/workflows/ci.yml/badge.svg)](https://github.com/aquiadi/ctn-mvp-complete/actions/workflows/ci.yml)
+[![Deploy contracts](https://github.com/aquiadi/ctn-mvp-complete/actions/workflows/deploy-contracts.yml/badge.svg)](https://github.com/aquiadi/ctn-mvp-complete/actions/workflows/deploy-contracts.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Cite](https://img.shields.io/badge/cite-CITATION.cff-8A2BE2.svg)](CITATION.cff)
 
-Turns metered solar generation into impact records you can actually check.
-Readings are signed by the sensor, checked for physical plausibility,
-accumulated until a full tonne of CO₂ has been avoided, certified to IPFS,
-minted on Polygon, traded on a marketplace, and retired on-chain for a named
-beneficiary.
+[![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](backend/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](backend/main.py)
+[![Solidity 0.8.26](https://img.shields.io/badge/solidity-0.8.26-363636?logo=solidity&logoColor=white)](carboncredit-deploy/contracts/)
+[![OpenZeppelin 5](https://img.shields.io/badge/OpenZeppelin-5-4E5EE4?logo=openzeppelin&logoColor=white)](carboncredit-deploy/package.json)
+[![Polygon Amoy](https://img.shields.io/badge/Polygon-Amoy%20testnet-7B3FE4?logo=polygon&logoColor=white)](https://amoy.polygonscan.com/address/0x890b51626Cc77E41d83fCaa147CF57955d62fA1c)
+[![IPFS](https://img.shields.io/badge/IPFS-Pinata-65C2CB?logo=ipfs&logoColor=white)](backend/ipfs_utils.py)
+[![ESP32](https://img.shields.io/badge/ESP32-Arduino-E7352C?logo=espressif&logoColor=white)](firmware/)
 
-Every figure the site shows traces back to a signed or imported reading, an
-emission factor with a stated source and vintage, and a transaction hash.
-Avoided CO₂ is a calculation from measured energy, and the calculation is
-shown. Nothing is hardcoded in the frontend.
+[**Live site**](https://ctn-mvp-complete-j52y.vercel.app) ·
+[**API docs**](https://ctn-api-railway-production.up.railway.app/docs) ·
+[**Signing spec**](https://ctn-api-railway-production.up.railway.app/api/v1/spec) ·
+[**Reproducibility**](docs/REPRODUCIBILITY.md) ·
+[**Firmware**](firmware/README.md)
+
+</div>
+
+---
+
+CTN turns metered solar generation into impact records you can actually check.
+Each ESP32 sensor signs its own readings with a key that never leaves it. The
+server rejects anything forged, replayed, or physically impossible, and
+screens the rest for anomalies. Readings accumulate into exact one-tonne
+records. Each record's evidence is pinned to IPFS, it is minted on Polygon,
+sold on a marketplace with a 70/20/10 settlement split, and retired on-chain
+for a named beneficiary.
+
+Every figure traces back to a signed or imported reading, an emission factor
+with a stated source and vintage, and a transaction hash.
+
+## At a glance
 
 | | |
 |---|---|
-| **Live site** | https://ctn-mvp-complete-j52y.vercel.app |
-| **API** | https://ctn-api-railway-production.up.railway.app/api |
-| **API docs** | https://ctn-api-railway-production.up.railway.app/docs |
-| **Contract** | [`0x1b4F…7Cf6`](https://amoy.polygonscan.com/address/0x1b4F5A7CEf1c2CFb914A5642CC82F887AB0C7Cf6) on Polygon Amoy |
+| 🔏 **Device-signed data** | secp256k1 / EIP-191 signatures made on the sensor. The server holds only public keys, so it can verify readings but never forge them. |
+| ⚡ **Physics before trust** | Timestamps within ±300 s and strictly increasing; energy capped by rated capacity × elapsed time; each reading must match the device's lifetime meter counter. |
+| 🛡️ **Tamper evidence** | Opening the enclosure increments a counter signed into every reading, which withdraws the installation's approval until someone re-checks the site. |
+| 🔍 **Anomaly screening** | Night generation, flatlined meters, and statistical outliers are held for human review. Screening never silently rejects. |
+| 🧾 **Self-verifying certificates** | Each record's IPFS certificate carries every signed reading, the device key, and the methodology parameters. Anyone can verify it without calling this API. |
+| ⛓️ **Exactly-once settlement** | Atomic mint claims, on-chain IDs taken from each mint's own event, and V2 enforces one token per certificate on-chain. |
+| 💸 **70 / 20 / 10 split** | Each sale divides exactly between the generator, the treasury, and the reserve, in the database and in `CTNSettlement.sol`. |
+
+## Verification
+
+| Suite | Size | What it proves |
+|---|---|---|
+| Backend (`pytest`) | 249 tests | Attestation, plausibility, V2 protocol, exact allocation, certificates, exactly-once minting, contract migration, settlement, marketplace concurrency, accounts |
+| Contracts (Hardhat) | 24 tests | V1 as deployed; V2 minting, duplicate-certificate guard, retirement, frozen retired tokens, two-step ownership; settlement split and withdrawals |
+| Firmware (host build) | 200 randomized cases per run | The C++ firmware's addresses, timestamps, and signed messages match the server byte for byte, and its signatures verify |
+
+All three run in CI on every push.
+
+## Deployments
+
+| | Address | Status |
+|---|---|---|
+| **CarbonCreditV2** | [`0x890b…fA1c`](https://amoy.polygonscan.com/address/0x890b51626Cc77E41d83fCaa147CF57955d62fA1c) | Deployed on Amoy. The API switches to it with `CONTRACT_ADDRESS` + `CONTRACT_VERSION=2` |
+| **CarbonCredit (V1)** | [`0x1b4F…7Cf6`](https://amoy.polygonscan.com/address/0x1b4F5A7CEf1c2CFb914A5642CC82F887AB0C7Cf6) | Original contract. Credits minted here stay readable and retirable after the switch |
+| **API** | [ctn-api-railway-production.up.railway.app](https://ctn-api-railway-production.up.railway.app/api) | Railway |
+| **Frontend** | [ctn-mvp-complete-j52y.vercel.app](https://ctn-mvp-complete-j52y.vercel.app) | Vercel |
 
 > [!NOTE]
 > A testnet MVP. Payments are simulated and clearly labelled as such throughout;
-> no money moves. Credits are minted on Amoy, not mainnet. The demo dataset is a
+> no money moves. Records are minted on Amoy, not mainnet. The demo dataset is a
 > replay of a public Kaggle inverter dataset, not CTN hardware; see
 > [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md).
+
+<details>
+<summary><b>Contents</b></summary>
+
+- [Try it](#try-it)
+- [Connecting a sensor](#connecting-a-sensor)
+- [Signed sensor data](#signed-sensor-data)
+- [How a credit is made](#how-a-credit-is-made)
+- [Running locally](#running-locally)
+- [Architecture](#architecture)
+- [Accounts](#accounts)
+- [Tests](#tests)
+- [Deployment](#deployment)
+- [Security](#security)
+- [Where a credit's trust comes from](#where-a-credits-trust-comes-from)
+- [Known limitations](#known-limitations)
+- [Stack](#stack)
+
+</details>
 
 ---
 
@@ -500,7 +568,7 @@ backend/
   data_utils.py               Cumulative meter readings → per-interval deltas
   ipfs_utils.py               Pinata certificate storage
   routes/                     auth · installer · marketplace · admin · ingest
-  tests/                      228 tests
+  tests/                      249 tests
 
 firmware/
   ctn_sensor/                 ESP32: PZEM-004T, DS3231, reed switch, signed V2 reports
@@ -549,12 +617,14 @@ listed or reserved, a buyer holding a reservation, or the last administrator.
 cd backend && ../.venv/bin/python -m pytest
 ```
 
-228 tests. They cover:
+249 tests. They cover:
 
 - device attestation and the V2 meter/tamper protocol
 - physical-plausibility rules and anomaly screening
 - exact credit allocation and self-verifying certificates
 - exactly-once minting against a fake chain
+- moving to a new contract without stranding credits minted on the old one
+- the 70/20/10 settlement split, including mixed-seller baskets
 - self-service onboarding, authentication and role enforcement,
   wallet-signature verification
 - marketplace concurrency, account transfer and closure
