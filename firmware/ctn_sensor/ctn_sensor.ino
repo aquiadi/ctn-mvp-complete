@@ -1,313 +1,331 @@
 /*
- * CTN solar sensor — ESP32 reference firmware.
+ * CTN solar sensor — ESP32 firmware.
  *
- * Connects over WiFi and talks HTTPS to the CTN API. There is no wired link and
- * no gateway: the device is the client, so it works anywhere there is a network,
- * and nothing has to be opened up on the seller's side.
+ * Measures AC energy with a PZEM-004T, timestamps with a DS3231, counts
+ * enclosure openings with a reed switch, and reports signed CTN-READING-V2
+ * packets to the CTN API over HTTPS.
  *
- * On first boot it generates a secp256k1 keypair, stores it in NVS, and redeems
- * the pairing code from the seller's dashboard. From then on it signs every
- * reading it sends. The private key is never transmitted and never leaves flash,
- * so the server can verify a reading but cannot forge one, and neither can
- * anyone who intercepts the traffic.
+ *   ctn_crypto     secp256k1 keys, Keccak-256, EIP-191 signing   (portable)
+ *   ctn_protocol   canonical message, timestamps, meter maths    (portable)
+ *   meter          PZEM-004T register → lifetime Wh counter
+ *   rtc_clock      DS3231 disciplined by NTP
+ *   tamper         reed switch → monotonic tamper counter
+ *   device_store   NVS persistence
+ *   api_client     HTTPS with certificate validation
  *
- * ── Wiring ────────────────────────────────────────────────────────────────
- * Energy measurement is deliberately isolated in readEnergyWh(). Replace its
- * body with whatever your hardware provides:
+ * The portable modules are compiled on a host in CI and checked byte for byte
+ * against the server's verifier (firmware/test). The hardware modules have
+ * not yet been run on a physical board; see firmware/README.md for the bench
+ * bring-up checklist before trusting a device on a roof.
  *
- *   Pulse meter  : count S0 pulses on a GPIO, watt-hours = pulses / pulsesPerKwh
- *   CT clamp     : SCT-013 into an ADC pin, integrate power over the interval
- *   Modbus       : read the register your inverter exposes over RS485
- *
- * Everything else in this file is transport and cryptography and stays the same.
- *
- * ── Libraries ─────────────────────────────────────────────────────────────
- *   micro-ecc  (kmackay)      secp256k1 signing
- *   Crypto     (rweather)     Keccak-256 for EIP-191
- *   ArduinoJson (bblanchon)
- *
- * ── Status ────────────────────────────────────────────────────────────────
- * The signing scheme and API contract are exercised by the server test suite
- * and by tools/sensor_sim.py. This sketch has NOT been run on physical
- * hardware — treat it as a reference implementation to verify on your bench
- * before trusting it on a roof.
+ * Libraries: micro-ecc (kmackay), Crypto (rweather), ArduinoJson 7 (bblanchon),
+ * PZEM004Tv30 (mandulaj), RTClib (Adafruit).
  */
 
+// meter_wh is a 64-bit counter; make sure ArduinoJson carries it exactly.
+#define ARDUINOJSON_USE_LONG_LONG 1
+
 #include <Arduino.h>
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
-#include <Preferences.h>
 #include <ArduinoJson.h>
+#include <WiFi.h>
+#include <esp_system.h>
 #include <uECC.h>
-#include <Crypto.h>
-#include <SHA3.h>
 
-// ── Configuration ─────────────────────────────────────────────────────────
+#include "api_client.h"
+#include "config.h"
+#include "ctn_crypto.h"
+#include "ctn_protocol.h"
+#include "device_store.h"
+#include "meter.h"
+#include "rtc_clock.h"
+#include "tamper.h"
 
-static const char* WIFI_SSID     = "your-wifi";
-static const char* WIFI_PASSWORD = "your-wifi-password";
+namespace {
 
-static const char* API_HOST = "https://ctn-api-railway-production.up.railway.app";
+DeviceState state;
+char address[ctn::kAddressHexSize];
 
-// From your dashboard: Add a device → copy the pairing code. Single use.
-static const char* ENROLLMENT_CODE = "CTN-XXXXXXXX-XXXXXXXX";
+uint32_t lastReportAttemptMs = 0;
+uint32_t lastProgressMs = 0;
+uint32_t lastNtpSyncMs = 0;
+bool halted = false;  // set when only a person can fix the problem
 
-// Must be unique across the platform.
-static const char* DEVICE_ID = "ROOF-01";
-
-// How often a reading is emitted. Shorter means finer resolution and more
-// traffic; the server accumulates either way.
-static const uint32_t REPORT_INTERVAL_MS = 15UL * 60UL * 1000UL;
-
-// ── State ─────────────────────────────────────────────────────────────────
-
-Preferences prefs;
-uint8_t privateKey[32];
-uint8_t publicKey[64];
-uint32_t sequence = 0;
-
-// ── Keccak-256, as EIP-191 requires (not SHA3-256) ────────────────────────
-
-static void keccak256(const uint8_t* data, size_t length, uint8_t* out) {
-  SHA3_256 hash;                 // rweather's SHA3_256 in Keccak mode
-  hash.reset();
-  hash.update(data, length);
-  hash.finalize(out, 32);
-}
-
-// ── Key management ────────────────────────────────────────────────────────
-
-static int rng(uint8_t* dest, unsigned size) {
-  // esp_random() draws from the hardware RNG, which is seeded by RF noise.
-  while (size--) *dest++ = (uint8_t)(esp_random() & 0xFF);
+// esp_random() is a true RNG only while the radio is on, so keys are generated
+// after WiFi connects. Signing does not depend on it (see ctn_crypto.h); it is
+// used there only to blind the scalar multiplication.
+int hardwareRng(uint8_t* dest, unsigned size) {
+  esp_fill_random(dest, size);
   return 1;
 }
 
-/* The address is the last 20 bytes of the Keccak hash of the public key. */
-static String deriveAddress(const uint8_t* pubKey) {
-  uint8_t hash[32];
-  keccak256(pubKey, 64, hash);
-
-  String address = "0x";
-  for (int i = 12; i < 32; i++) {
-    char byteHex[3];
-    snprintf(byteHex, sizeof(byteHex), "%02x", hash[i]);
-    address += byteHex;
-  }
-  return address;
+void halt(const char* reason) {
+  halted = true;
+  Serial.printf("[halt] %s\n", reason);
 }
 
-static void loadOrCreateKeypair() {
-  prefs.begin("ctn", false);
-  sequence = prefs.getUInt("seq", 0);
+// ── Connectivity ────────────────────────────────────────────────────────────
 
-  if (prefs.getBytesLength("privkey") == 32) {
-    prefs.getBytes("privkey", privateKey, 32);
-    prefs.getBytes("pubkey", publicKey, 64);
-    Serial.println("Loaded existing key from flash");
+bool ensureWifi() {
+  if (WiFi.status() == WL_CONNECTED) return true;
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(CTN_WIFI_SSID, CTN_WIFI_PASSWORD);
+  const uint32_t started = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - started < 30000) delay(250);
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[wifi] not connected; will retry");
+    return false;
+  }
+  Serial.printf("[wifi] %s\n", WiFi.localIP().toString().c_str());
+  return true;
+}
+
+// ── Identity and enrolment ──────────────────────────────────────────────────
+
+void ensureKey() {
+  if (state.hasKey) return;
+  Serial.println("[key] first boot: generating keypair");
+  if (!ctn::generateKeypair(state.privateKey, state.publicKey)) {
+    halt("key generation failed");
     return;
   }
-
-  Serial.println("First boot — generating keypair");
-  const struct uECC_Curve_t* curve = uECC_secp256k1();
-  uECC_set_rng(&rng);
-  if (!uECC_make_key(publicKey, privateKey, curve)) {
-    Serial.println("Key generation failed; halting rather than sending unsigned data");
-    while (true) delay(1000);
-  }
-
-  prefs.putBytes("privkey", privateKey, 32);
-  prefs.putBytes("pubkey", publicKey, 64);
-  Serial.println("Key stored. It never leaves this device.");
+  state.hasKey = true;
+  store::saveKey(state);
 }
 
-// ── Signing ───────────────────────────────────────────────────────────────
-
-/* Must match the server byte for byte. See GET /api/v1/spec. */
-static String canonicalMessage(uint32_t seq, const String& timestamp, float deltaKwh) {
-  char kwh[24];
-  snprintf(kwh, sizeof(kwh), "%.6f", deltaKwh);   // fixed precision, always
-
-  String message = "CTN-READING-V1\n";
-  message += "device:"    + String(DEVICE_ID) + "\n";
-  message += "sequence:"  + String(seq)       + "\n";
-  message += "timestamp:" + timestamp         + "\n";
-  message += "delta_kwh:" + String(kwh);
-  return message;
-}
-
-/* EIP-191: keccak256("\x19Ethereum Signed Message:\n" + len + message). */
-static void eip191Digest(const String& message, uint8_t* digest) {
-  String prefixed = "\x19""Ethereum Signed Message:\n" + String(message.length()) + message;
-  keccak256((const uint8_t*)prefixed.c_str(), prefixed.length(), digest);
-}
-
-static String signMessage(const String& message) {
-  uint8_t digest[32];
-  eip191Digest(message, digest);
-
-  uint8_t signature[64];
-  const struct uECC_Curve_t* curve = uECC_secp256k1();
-  if (!uECC_sign(privateKey, digest, 32, signature, curve)) return "";
-
-  // Emitted as plain r||s, without the Ethereum recovery id. micro-ecc cannot
-  // derive it, and the server tries both possibilities — so there is nothing
-  // here to get wrong.
-  String hex = "0x";
-  for (int i = 0; i < 64; i++) {
-    char byteHex[3];
-    snprintf(byteHex, sizeof(byteHex), "%02x", signature[i]);
-    hex += byteHex;
-  }
-  return hex;
-}
-
-// ── HTTP ──────────────────────────────────────────────────────────────────
-
-static int postJson(const String& path, const String& body, String& response) {
-  WiFiClientSecure client;
-  // Pin the API's CA in production. setInsecure() skips certificate validation,
-  // which is acceptable only while bringing a device up on the bench.
-  client.setInsecure();
-
-  HTTPClient http;
-  if (!http.begin(client, String(API_HOST) + path)) return -1;
-  http.addHeader("Content-Type", "application/json");
-
-  int status = http.POST(body);
-  response = http.getString();
-  http.end();
-  return status;
-}
-
-// ── Enrollment ────────────────────────────────────────────────────────────
-
-static bool enrollIfNeeded() {
-  if (prefs.getBool("enrolled", false)) return true;
+bool enrol() {
+  if (state.enrolled) return true;
 
   JsonDocument doc;
-  doc["enrollment_code"] = ENROLLMENT_CODE;
-  doc["device_id"]       = DEVICE_ID;
-  doc["public_key"]      = deriveAddress(publicKey);
-
+  doc["enrollment_code"] = CTN_ENROLLMENT_CODE;
+  doc["device_id"] = CTN_DEVICE_ID;
+  doc["public_key"] = address;
   String body, response;
   serializeJson(doc, body);
 
-  int status = postJson("/api/v1/devices/enroll", body, response);
-  Serial.printf("Enrollment: HTTP %d\n%s\n", status, response.c_str());
+  const int status = api::post("/api/v1/devices/enroll", body, response);
+  Serial.printf("[enrol] HTTP %d %s\n", status, response.c_str());
 
   if (status == 200) {
-    prefs.putBool("enrolled", true);
-    Serial.println("Enrolled. Reporting begins now.");
+    // Energy counted before enrolment was never attested; the first reading
+    // claims only what is measured from here on.
+    state.enrolled = true;
+    state.ackedSequence = 0;
+    state.ackedEpoch = 0;
+    state.ackedWh = state.totalWh;
+    store::saveEnrolled(state);
     return true;
   }
-
-  // 409 means this device or code is already registered — if the flag was lost
-  // but the server knows us, carry on rather than retrying forever.
-  if (status == 409) {
-    prefs.putBool("enrolled", true);
-    return true;
+  if (status == 404 || status == 409 || status == 410) {
+    halt("pairing code rejected (unknown, used, or expired); reflash with a new one");
   }
-
-  Serial.println("Enrollment failed. Check the pairing code has not expired.");
   return false;
 }
 
-// ── Measurement ───────────────────────────────────────────────────────────
+// ── Resynchronisation ───────────────────────────────────────────────────────
 
-/*
- * Return watt-hours generated since the previous call.
- *
- * Replace this with your meter. The placeholder emits a small constant so the
- * pipeline can be exercised end to end before hardware is attached.
- */
-static float readEnergyWh() {
-  return 150.0f;   // ~0.15 kWh per interval
-}
-
-// ── Time ──────────────────────────────────────────────────────────────────
-
-static String isoTimestamp() {
-  time_t now = time(nullptr);
-  struct tm timeinfo;
-  gmtime_r(&now, &timeinfo);
-
-  char buffer[32];
-  strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
-  return String(buffer);
-}
-
-// ── Reporting ─────────────────────────────────────────────────────────────
-
-static void reportReading() {
-  float deltaKwh = readEnergyWh() / 1000.0f;
-  if (deltaKwh <= 0) return;
-
-  sequence++;
-  String timestamp = isoTimestamp();
-  String message   = canonicalMessage(sequence, timestamp, deltaKwh);
-  String signature = signMessage(message);
-
-  if (signature.isEmpty()) {
-    Serial.println("Signing failed; dropping the reading rather than sending it unsigned");
-    sequence--;
-    return;
+// Adopt the server's committed position after an ambiguous failure: a lost
+// response to an accepted reading, or a counter mismatch. Energy the server
+// already has is not claimed again; energy it lacks is still carried.
+bool resync() {
+  String path = String("/api/v1/devices/") + CTN_DEVICE_ID;
+  String response;
+  const int status = api::get(path.c_str(), response);
+  if (status != 200) {
+    Serial.printf("[resync] HTTP %d\n", status);
+    return false;
   }
 
   JsonDocument doc;
-  JsonArray readings = doc["readings"].to<JsonArray>();
-  JsonObject reading = readings.add<JsonObject>();
-  reading["device_id"] = DEVICE_ID;
-  reading["sequence"]  = sequence;
-  reading["timestamp"] = timestamp;
-  reading["delta_kwh"] = deltaKwh;
-  reading["signature"] = signature;
+  if (deserializeJson(doc, response)) return false;
 
-  String body, response;
-  serializeJson(doc, body);
-
-  int status = postJson("/api/v1/readings", body, response);
-  Serial.printf("Reading %u: HTTP %d\n%s\n", sequence, status, response.c_str());
-
-  if (status == 200) {
-    // Only advance the stored counter once the server has accepted it, so a
-    // failed send is retried rather than leaving a permanent gap.
-    prefs.putUInt("seq", sequence);
-  } else {
-    sequence--;
+  const char* expected = doc["public_key"] | "";
+  if (strcasecmp(expected, address) != 0) {
+    halt("server holds a different key for this device id; re-enrol");
+    return false;
   }
+
+  state.ackedSequence = doc["last_sequence"] | 0UL;
+  if (!doc["last_meter_wh"].isNull()) {
+    const uint64_t serverWh = doc["last_meter_wh"].as<uint64_t>();
+    if (serverWh > state.totalWh) {
+      halt("server's meter counter is ahead of this device (storage lost?); re-enrol");
+      return false;
+    }
+    state.ackedWh = serverWh;
+  }
+  const uint32_t serverTamper = doc["tamper_count"] | 0UL;
+  if (serverTamper > state.tamperCount) {
+    state.tamperCount = serverTamper;
+    store::saveTamper(state);
+  }
+  store::saveAck(state);
+  Serial.printf("[resync] sequence %lu, acked %llu Wh\n",
+                static_cast<unsigned long>(state.ackedSequence),
+                static_cast<unsigned long long>(state.ackedWh));
+  return true;
 }
 
-// ── Lifecycle ─────────────────────────────────────────────────────────────
+// ── Reporting ───────────────────────────────────────────────────────────────
 
-void setup() {
-  Serial.begin(115200);
-  delay(500);
+void report() {
+  bool reset = false;
+  if (!meter::poll(state, reset)) {
+    Serial.println("[meter] PZEM did not answer; skipping this interval");
+    return;
+  }
+  if (reset) Serial.println("[meter] PZEM register went backwards; energy before the reset is not claimed");
+  store::saveMeter(state);
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
-  Serial.printf("\nConnected: %s\n", WiFi.localIP().toString().c_str());
-
-  // Readings are timestamped, so the clock has to be right.
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-  while (time(nullptr) < 1700000000) { delay(500); Serial.print("."); }
-  Serial.println("\nClock synchronised");
-
-  loadOrCreateKeypair();
-  Serial.printf("Device address: %s\n", deriveAddress(publicKey).c_str());
-
-  while (!enrollIfNeeded()) delay(30000);
-}
-
-void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
-    WiFi.reconnect();
-    delay(5000);
+  int64_t epoch;
+  if (!rtc_clock::now(epoch)) {
+    Serial.println("[clock] time not trusted yet; holding the reading");
+    return;
+  }
+  if (epoch <= state.ackedEpoch) {
+    // Never sign a timestamp the server would reject as out of order.
+    Serial.println("[clock] clock is behind the last accepted reading; holding");
     return;
   }
 
-  reportReading();
-  delay(REPORT_INTERVAL_MS);
+  const uint32_t sequence = state.ackedSequence + 1;
+  const uint64_t deltaWh = state.totalWh - state.ackedWh;
+
+  char timestamp[ctn::kTimestampSize];
+  ctn::formatTimestamp(epoch, timestamp);
+
+  char message[384];
+  const size_t length = ctn::canonicalMessage(message, sizeof(message), CTN_DEVICE_ID, sequence,
+                                              timestamp, deltaWh, state.totalWh, state.tamperCount);
+  uint8_t signature[ctn::kSignatureSize];
+  if (length == 0 || !ctn::signMessage(state.privateKey, message, length, signature)) {
+    halt("could not build or sign a reading");
+    return;
+  }
+  char signatureHex[2 + 2 * ctn::kSignatureSize + 1];
+  ctn::toHex(signature, sizeof(signature), signatureHex);
+
+  // delta_kwh is written as the exact decimal text that was signed, so no
+  // float round trip can make the two disagree.
+  char kwh[32];
+  ctn::formatKwh(deltaWh, kwh, sizeof(kwh));
+
+  JsonDocument doc;
+  JsonObject reading = doc["readings"].to<JsonArray>().add<JsonObject>();
+  reading["device_id"] = CTN_DEVICE_ID;
+  reading["sequence"] = sequence;
+  reading["timestamp"] = timestamp;
+  reading["delta_kwh"] = serialized(kwh);
+  reading["message_version"] = ctn::kMessageVersion;
+  reading["meter_wh"] = state.totalWh;
+  reading["tamper_count"] = state.tamperCount;
+  reading["signature"] = signatureHex;
+
+  String body, response;
+  serializeJson(doc, body);
+  const int status = api::post("/api/v1/readings", body, response);
+  Serial.printf("[report] seq %lu, %s kWh: HTTP %d %s\n", static_cast<unsigned long>(sequence), kwh,
+                status, response.c_str());
+
+  switch (status) {
+    case 200:
+      state.ackedSequence = sequence;
+      state.ackedEpoch = epoch;
+      state.ackedWh = state.totalWh;
+      store::saveAck(state);
+      lastProgressMs = millis();
+      break;
+
+    case 409:  // replay: an earlier send was accepted but its response was lost
+      resync();
+      break;
+
+    case 422: {
+      JsonDocument error;
+      deserializeJson(error, response);
+      const char* code = error["detail"]["code"] | "";
+      if (strcmp(code, "meter_discontinuity") == 0) {
+        resync();
+      } else if (strcmp(code, "exceeds_capacity") == 0) {
+        // Keep carrying the energy: over a longer interval the bound grows.
+        // A genuine meter fault never clears and needs a person.
+        Serial.println("[report] above rated capacity; holding energy for the next interval");
+      } else if (strcmp(code, "meter_regressed") == 0 || strcmp(code, "tamper_counter_regressed") == 0) {
+        halt("server rejected a counter as regressed; re-enrol");
+      }
+      break;
+    }
+
+    case 401:
+      halt("server does not recognise this device's signature; re-enrol");
+      break;
+
+    case 404:
+      halt("device is not registered on the server");
+      break;
+
+    default:  // network errors and 5xx: energy stays unacknowledged and is retried
+      break;
+  }
+}
+
+}  // namespace
+
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+  Serial.printf("\nCTN sensor %s\n", CTN_DEVICE_ID);
+
+  store::begin();
+  store::load(state);
+  rtc_clock::begin();
+  meter::begin();
+  tamper::begin(state);
+  uECC_set_rng(&hardwareRng);
+
+  // The radio has to be on before key generation for esp_random to be a TRNG.
+  while (!ensureWifi()) delay(5000);
+  rtc_clock::syncFromNtp();
+  lastNtpSyncMs = millis();
+
+  ensureKey();
+  if (!halted) {
+    ctn::addressHex(state.publicKey, address);
+    Serial.printf("[key] device address %s\n", address);
+  }
+
+  lastProgressMs = millis();
+  // Report on the first loop iteration rather than a full interval later.
+  lastReportAttemptMs = millis() - kReportIntervalMs;
+}
+
+void loop() {
+  tamper::service(state);
+
+  if (halted) {
+    delay(1000);
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (now - lastReportAttemptMs >= kReportIntervalMs) {
+    lastReportAttemptMs = now;
+    if (ensureWifi()) {
+      if (now - lastNtpSyncMs >= kNtpResyncMs && rtc_clock::syncFromNtp()) lastNtpSyncMs = now;
+      if (enrol()) report();
+    } else {
+      // Still fold the meter so a reset during the outage is noticed promptly.
+      bool reset = false;
+      if (meter::poll(state, reset)) store::saveMeter(state);
+    }
+  }
+
+  if (millis() - lastProgressMs >= kNoProgressRebootMs) {
+    Serial.println("[watchdog] no accepted reading for too long; restarting");
+    delay(100);
+    ESP.restart();
+  }
+
+  delay(50);
 }

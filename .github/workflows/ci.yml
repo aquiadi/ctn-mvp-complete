@@ -32,10 +32,50 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Lint (pyflakes)
-        run: pyflakes config.py main.py auth.py chain.py database.py data_utils.py ipfs_utils.py rate_limit.py routes tests
+        run: pyflakes *.py routes tests
 
       - name: Run tests
         run: python -m pytest -q
+
+  contracts:
+    name: Contracts — compile & test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: carboncredit-deploy
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: carboncredit-deploy/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npx hardhat test
+
+  firmware:
+    name: Firmware — host crypto & protocol test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements-dev.txt
+
+      - name: Build and verify against the server's attestation code
+        run: firmware/test/run_host_test.sh
 
   frontend:
     name: Frontend — syntax check
