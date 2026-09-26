@@ -17,7 +17,7 @@ module.exports = {
   },
   networks: {
     amoy: {
-      url: process.env.AMOY_RPC || "https://rpc-amoy.polygon.technology/",
+      url: process.env.AMOY_RPC || "https://polygon-amoy-bor-rpc.publicnode.com",
       chainId: 80002,
       accounts: deployerKey,
     },

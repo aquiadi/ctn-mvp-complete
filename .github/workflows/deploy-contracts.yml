@@ -7,7 +7,8 @@ name: Deploy contracts
 #   DEPLOYER_PRIVATE_KEY   required. Use the same key as the API's PRIVATE_KEY,
 #                          so the API wallet owns V2 and can mint on it. It
 #                          needs test POL for gas.
-#   AMOY_RPC               optional. Defaults to the public Amoy RPC.
+#   AMOY_RPC               optional. Defaults to polygon-amoy-bor-rpc.publicnode.com,
+#                          the same endpoint the API uses.
 #   POLYGONSCAN_API_KEY    optional. Enables source verification.
 #
 # Then Actions → Deploy contracts → Run workflow. Deploying changes nothing on
