@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it using these metadata. Cite the
+  tagged release your results came from, not the default branch.
+title: "Climate Trust Network (CTN): an IoT-to-blockchain prototype for verifiable renewable-energy MRV"
+type: software
+authors:
+  - family-names: Jha
+    given-names: Aditya
+    email: aqui.adi.j@gmail.com
+    affiliation: Independent researcher, Patna, India
+repository-code: "https://github.com/aquiadi/ctn-mvp-complete"
+url: "https://climateos.co"
+license: MIT
+version: 0.3.0
+keywords:
+  - digital MRV
+  - Internet of Things
+  - blockchain
+  - data provenance
+  - renewable energy
+  - carbon accounting
+abstract: >-
+  Signed solar-generation readings from ESP32 sensors are checked for
+  authenticity and physical plausibility, allocated into one-tonne CO2
+  impact records with self-verifying certificates on IPFS, and settled on
+  Polygon Amoy. A prototype, not an accredited crediting programme.

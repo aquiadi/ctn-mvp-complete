@@ -2,13 +2,16 @@
 
 [![CI](https://github.com/aquiadi/ctn-mvp-complete/actions/workflows/ci.yml/badge.svg)](https://github.com/aquiadi/ctn-mvp-complete/actions/workflows/ci.yml)
 
-Turns metered solar generation into carbon credits you can actually check.
-Readings are signed on arrival, accumulated until a full tonne of CO₂ has been
-avoided, certified to IPFS, minted on Polygon, traded on a marketplace, and
-retired on-chain to complete the offset.
+Turns metered solar generation into impact records you can actually check.
+Readings are signed by the sensor, checked for physical plausibility,
+accumulated until a full tonne of CO₂ has been avoided, certified to IPFS,
+minted on Polygon, traded on a marketplace, and retired on-chain for a named
+beneficiary.
 
-Every figure the site shows traces back to a meter reading and a transaction
-hash. Nothing is estimated, and nothing is hardcoded in the frontend.
+Every figure the site shows traces back to a signed or imported reading, an
+emission factor with a stated source and vintage, and a transaction hash.
+Avoided CO₂ is a calculation from measured energy, and the calculation is
+shown. Nothing is hardcoded in the frontend.
 
 | | |
 |---|---|
@@ -19,7 +22,9 @@ hash. Nothing is estimated, and nothing is hardcoded in the frontend.
 
 > [!NOTE]
 > A testnet MVP. Payments are simulated and clearly labelled as such throughout;
-> no money moves. Credits are minted on Amoy, not mainnet.
+> no money moves. Credits are minted on Amoy, not mainnet. The demo dataset is a
+> replay of a public Kaggle inverter dataset, not CTN hardware; see
+> [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md).
 
 ---
 
@@ -77,14 +82,14 @@ The device is the client, over ordinary WiFi. Nothing is wired, no gateway sits
 in between, and nothing has to be opened up on the seller's network — it works
 behind any home router.
 
-`firmware/ctn_sensor/` is a working ESP32 sketch. Measurement is isolated in one
-function, so a pulse meter, a CT clamp, or a Modbus inverter register all drop
-in without touching the transport or the cryptography.
+`firmware/ctn_sensor/` is the ESP32 firmware: a PZEM-004T for AC energy, a
+DS3231 for time through outages, and a reed switch for enclosure tamper. The
+crypto and wire format are plain C++ that CI builds on a host and checks byte
+for byte against the server. See [firmware/README.md](firmware/README.md).
 
 > [!NOTE]
-> The signing scheme and API contract are covered by the test suite and by
-> `tools/sensor_sim.py`. The sketch itself has not been run on physical
-> hardware — verify it on a bench before trusting it on a roof.
+> The hardware drivers have not yet been run on a physical board. Work through
+> the bring-up checklist in the firmware README before trusting one on a roof.
 
 ### Earning versus selling
 
@@ -115,31 +120,74 @@ extract from firmware.
 ```
 POST /api/v1/readings
 { "readings": [ { "device_id": "ROOF-01", "sequence": 1042,
-                  "timestamp": "2026-06-01T06:00:00Z",
-                  "delta_kwh": 0.61, "signature": "0x…" } ] }
+                  "timestamp": "2026-06-01T06:00:00Z", "delta_kwh": 0.61,
+                  "message_version": "CTN-READING-V2",
+                  "meter_wh": 1284610, "tamper_count": 0,
+                  "signature": "0x…" } ] }
 ```
 
 The device signs exactly this text, and the server reconstructs it to recover
 the signer:
 
 ```
-CTN-READING-V1
+CTN-READING-V2
 device:ROOF-01
 sequence:1042
 timestamp:2026-06-01T06:00:00Z
 delta_kwh:0.610000
+meter_wh:1284610
+tamper_count:0
 ```
 
 Energy is signed at fixed precision because floats have no single textual form,
 and every field that affects the credit is covered — anything left out could be
-altered in transit without breaking the signature. `GET /api/v1/spec` serves the
-contract from the code that enforces it, so the documentation cannot drift.
+altered in transit without breaking the signature. `meter_wh` is the device's
+lifetime energy counter and `tamper_count` its enclosure-open count; both only
+ever increase. V1, the same message without those two lines, is still accepted
+from devices that have never sent V2. `GET /api/v1/spec` serves the contract
+from the code that enforces it, so the documentation cannot drift.
 
-**What is rejected.** A signature from any other key. A packet whose energy,
-timestamp, device, or sequence was altered after signing. A replayed packet —
-sequences are monotonic per device, so a captured reading cannot be resubmitted.
+**What is rejected.** Authentication comes first:
+
+- A signature from any other key (401).
+- A packet whose energy, timestamp, device, sequence, or counters were altered
+  after signing (401).
+- A replayed packet (409). Sequences are monotonic per device, so a captured
+  reading cannot be resubmitted.
+
+Then physical plausibility, since a valid signature proves who produced a
+number, not that it could be true. Each rule is a 422 with a machine-readable
+`code`:
+
+- **Timestamps:** strict UTC, at most 300 s ahead of server time, inside a
+  72 h backfill window, after the device registered, and after its previous
+  reading.
+- **Capacity:** energy no more than the device's declared rated capacity ×
+  elapsed interval × 1.10. Devices that declared none get a loose default.
+- **Meter continuity (V2):** `delta_kwh` must equal how far `meter_wh`
+  advanced. Neither counter may go backwards, and a device that has sent V2
+  cannot fall back to V1.
+
 A batch is applied whole or not at all, since a partial apply would leave a gap
 indistinguishable from missing generation.
+
+**Tamper.** When `tamper_count` advances, the device's installation
+confirmation is withdrawn and a device event is recorded. Credits from then on
+are issued pending until an operator re-checks the site.
+
+**Anomaly screening.** Beside the hard rules, each reading is screened for:
+
+- generation while the sun is below the horizon at the registered coordinates;
+- a meter repeating one value for hours;
+- power far above the device's own history for that hour of the solar day,
+  measured as a robust z-score.
+
+Screening never rejects. A flagged reading holds its credit in the admin
+review queue, with the measurement and threshold that tripped it.
+
+**Resync.** If a response is lost, the device retries, gets a 409, and reads
+`last_sequence` and `last_meter_wh` from `GET /api/v1/devices/{device_id}`. It
+continues from there without counting committed energy twice.
 
 **Verifying without trusting CTN.** `GET /api/v1/readings/{id}/proof` returns the
 signed text, the signature, and the device's public key. Recover the EIP-191
@@ -232,14 +280,24 @@ quietly equated with a signed reading.
 2. **Ingest.** Readings arrive signed from the device, or are imported from a
    CSV. Each is stored under a fingerprint derived from its device and
    timestamp, so re-ingesting the same data changes nothing.
-3. **Accumulate.** Unconsumed readings sum per device. At 1,000 kg of avoided
-   CO₂ a credit is issued and its contributing readings are marked consumed.
-   The remainder carries forward rather than being discarded.
-4. **Certify.** A certificate naming those readings is pinned to IPFS.
-5. **Mint.** An admin mints the credit to a wallet. The on-chain id, transaction
-   hash, and CID are recorded against it.
+3. **Accumulate.** Unallocated CO₂ is walked per device in time order. Every
+   1,000 kg becomes a credit. A reading that straddles two credits is split
+   between them in `credit_allocations`, so each credit's allocations add up to
+   exactly one tonne and the remainder persists between ingests.
+4. **Certify.** Each credit stores a self-contained certificate
+   (`ctn-certificate/v2`). It holds every contributing reading's signed text
+   and signature, the device key, the allocations, and the emission factor
+   with its source and vintage. Anyone holding only this document can verify
+   the credit. It is pinned to IPFS byte-exact.
+5. **Mint.** An admin mints a released credit to a wallet. A credit that is
+   pending or held for review cannot be minted. An atomic claim guarantees
+   exactly one broadcast. The on-chain id is read from the mint's own
+   `CreditMinted` event, and a mint whose confirmation was lost is resolved
+   through `/mint/{id}/reconcile`, not repeated.
 6. **Trade.** The installer lists it; a buyer reserves and purchases it.
-7. **Retire.** An admin retires it on-chain, completing the offset.
+7. **Retire.** An admin retires it on-chain for a named beneficiary, or for a
+   sold credit the buyer's account number (never an email). A listed or
+   reserved credit cannot be retired out from under a sale.
 
 `GET /verify/{credit_id}` resolves the stored on-chain id and compares the
 contract's recorded quantities against the database, reporting whether the two
@@ -248,23 +306,23 @@ ledgers agree — a direct lookup, not a scan.
 ```mermaid
 flowchart LR
     subgraph SRC["1 · Measure"]
-        S1["Device signs<br>CTN-READING-V1"]
+        S1["Device signs<br>CTN-READING-V2"]
         S2["Spreadsheet export<br>uploaded by the seller"]
     end
 
     subgraph ING["2 · Ingest"]
-        V["attestation.py<br>recover signer<br>reject forged · tampered · replayed"]
+        V["attestation.py · plausibility.py<br>recover signer · reject forged, replayed,<br>impossible · anomaly.py flags"]
         P["csv_schema.py + data_utils.py<br>interpret, preview, confirm"]
         F["fingerprint per device and timestamp<br>re-ingesting changes nothing"]
     end
 
     subgraph ACC["3 · Accumulate"]
-        A["sum unconsumed readings per device<br>remainder carries forward"]
+        A["allocate unallocated CO2 per device<br>readings split across credits"]
         T{"1,000 kg CO2<br>reached?"}
     end
 
     subgraph ISSUE["4 · Issue and certify"]
-        G{"installation<br>confirmed by an<br>operator?"}
+        G{"installation confirmed<br>and nothing flagged?"}
         CP["status: pending<br>cannot be listed"]
         CV["status: verified"]
         CERT["certificate pinned to IPFS"]
@@ -289,7 +347,7 @@ flowchart LR
     T -- "yes" --> G
     G -- "no" --> CP
     G -- "yes" --> CV
-    CP -- "operator confirms, credits released" --> CV
+    CP -- "operator confirms or releases hold" --> CV
     CV --> CERT --> M --> L --> RSV --> SOLD --> RET
     M -.-> VER
     RET -.-> VER
@@ -360,13 +418,13 @@ flowchart TB
 
         subgraph CORE["Domain logic"]
             direction LR
-            ATT["attestation.py<br>canonical message · EIP-191 recover"]
+            ATT["attestation.py · plausibility.py · anomaly.py<br>signatures · physical bounds · screening"]
             IMPORT["csv_schema.py · data_utils.py<br>column detection · cumulative to delta"]
             AUTHM["auth.py<br>JWT · bcrypt · role dependencies"]
             CFG["config.py<br>every tunable value"]
         end
 
-        DBL["database.py<br>schema · fingerprinted ingest<br>accumulate to 1 tonne · issue credit"]
+        DBL["database.py<br>schema · fingerprinted ingest<br>allocate to 1 tonne · certificates"]
         CHAINL["chain.py<br>web3.py on a worker thread"]
         IPFSL["ipfs_utils.py<br>certificate pinning"]
         SWEEP["release_stale_reservations<br>background task"]
@@ -376,7 +434,7 @@ flowchart TB
         direction LR
         SQL[("SQLite on a mounted volume<br>users · devices · generation_readings<br>credits · transactions · audit_log")]
         PIN["IPFS via Pinata<br>credit certificates"]
-        CHAINN["Polygon Amoy<br>CarbonCredit.sol"]
+        CHAINN["Polygon Amoy<br>CarbonCredit.sol (V2 ready)"]
     end
 
     DEV -- "signed readings over HTTPS" --> EDGE
@@ -431,20 +489,25 @@ backend/
   auth.py                     Sessions, password hashing, role dependencies
   chain.py                    Contract access, off the event loop
   database.py                 Schema, migrations, ingestion, credit issuance
-  attestation.py              Canonical signed message, signature verification
+  attestation.py              Canonical signed message (V1, V2), signature verification
+  plausibility.py             Timestamp, capacity, meter-continuity, tamper rules
+  anomaly.py                  Night generation, flatline, and outlier screening
   csv_schema.py               Works out what an uploaded export contains
   data_utils.py               Cumulative meter readings → per-interval deltas
   ipfs_utils.py               Pinata certificate storage
   routes/                     auth · installer · marketplace · admin · ingest
-  tests/                      177 tests
+  tests/                      228 tests
 
 firmware/
-  ctn_sensor/                 ESP32 sketch: enrol, sign, report over WiFi
+  ctn_sensor/                 ESP32: PZEM-004T, DS3231, reed switch, signed V2 reports
+  test/                       Host build of the firmware crypto, checked against the server
 
 tools/
-  sensor_sim.py               Reference client: pair, sign, submit, verify
+  sensor_sim.py               Reference client: pair, sign, submit, resync, verify
+  replay_dataset.py           Regenerates the demo dataset's figures from the public source
 
-carboncredit-deploy/          Hardhat project for the CarbonCredit contract
+carboncredit-deploy/          CarbonCredit (deployed V1) and CarbonCreditV2, with tests
+docs/REPRODUCIBILITY.md       Data provenance, figures, and component status
 ```
 
 Constants live in `backend/config.py` and reach the browser through
@@ -482,25 +545,45 @@ listed or reserved, a buyer holding a reservation, or the last administrator.
 cd backend && ../.venv/bin/python -m pytest
 ```
 
-177 tests covering device attestation, self-service onboarding, authentication
-and role enforcement, wallet-signature verification, credit issuance and
-idempotency, marketplace concurrency, account transfer and closure, spreadsheet
-interpretation, and the audit trail.
+228 tests. They cover:
+
+- device attestation and the V2 meter/tamper protocol
+- physical-plausibility rules and anomaly screening
+- exact credit allocation and self-verifying certificates
+- exactly-once minting against a fake chain
+- self-service onboarding, authentication and role enforcement,
+  wallet-signature verification
+- marketplace concurrency, account transfer and closure
+- spreadsheet interpretation and the audit trail
+
+The contract suite (`cd carboncredit-deploy && npx hardhat test`) covers the
+deployed V1 and V2. `firmware/test/run_host_test.sh` builds the firmware's
+crypto and protocol code for the host and checks it against the server.
 
 The attestation tests drive a simulated sensor — a real keypair and the
 reference signing routine — and assert that forged, tampered, and replayed
 packets are refused, and that a proof verifies independently of the server. They run against a temporary database and need no network access.
 
-Several are regression tests for specific defects, among them two buyers
-concurrently reserving the same credit, daily averages divided by a hardcoded
-period instead of the real one, and a request creating a device without review.
+Several are regression tests for specific defects, among them:
+
+- two buyers concurrently reserving the same credit
+- concurrent mints putting one credit on-chain twice
+- a signed 50 MWh reading dated 2099 issuing 41 credits
+- a credit's CO₂ remainder lost between requests
+- demo credits minted into the contract's own address
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request to `master`:
-the backend job installs pinned dependencies, lints with pyflakes, and runs the
-suite; the frontend job parses every shared module and inline page script, so a
-syntax error in a page cannot reach the deployed site.
+`.github/workflows/ci.yml` runs four jobs on every push and pull request to
+`master`:
+
+- **backend:** installs pinned dependencies, lints with pyflakes, and runs the
+  suite
+- **contracts:** compiles and tests both contracts
+- **firmware:** builds the portable firmware modules and verifies them against
+  the server
+- **frontend:** parses every shared module and inline page script, so a syntax
+  error in a page cannot reach the deployed site
 
 ---
 
@@ -529,6 +612,7 @@ silently running insecure.
 | `CORS_ORIGINS` | Exact frontend origin(s) |
 | `DATABASE_URL` | Must point inside a mounted volume — see below |
 | `PRIVATE_KEY` | Optional; enables minting and retirement |
+| `CONTRACT_VERSION` | `1` for the deployed contract; `2` after deploying CarbonCreditV2 and updating `CONTRACT_ADDRESS` |
 | `PINATA_API_KEY` / `PINATA_SECRET` | Optional; enables real IPFS pinning |
 
 ### Persistent storage
@@ -599,8 +683,10 @@ implying the strongest.
 | Question | Answered by | Not answered by it |
 |---|---|---|
 | Did this reading come from this device, unaltered? | Device signature | Whether the device measures anything real |
-| Is this device a genuine installation? | An operator confirming it | Anything cryptographic |
-| Has this credit been double-counted? | Readings are consumed once, sequences are monotonic | — |
+| Could this reading be physically true? | Capacity, timestamp, and meter-continuity rules | Whether a plausible number is the right one |
+| Does it look like this device's normal output? | Anomaly screening, then a person | Anything, on its own — it only flags |
+| Is this device a genuine installation, still sealed? | An operator confirming it; the tamper counter | Anything cryptographic |
+| Has this credit been double-counted? | Exact allocations, monotonic sequences and meter counter, one mint per credit (V2: one token per certificate on-chain) | — |
 | Does the ledger match the chain? | `/verify/{id}` compares both | Whether the input was honest |
 | Is the methodology sound? | Nothing here — see limitations | — |
 
@@ -634,9 +720,18 @@ state, but not a production carbon registry.
 - **Deploys briefly interrupt the API.** One instance, restarted in place, so
   there is a sub-minute window on every push. The frontend reconnects on its
   own rather than showing stale or invented figures.
-- **The ESP32 sketch is unverified on hardware.** The signing scheme it
-  implements is covered by the test suite and the reference client, but the
-  sketch itself has not been run on a device.
+- **The firmware has not run on a physical board.** Its crypto and wire
+  format are verified in CI against the server. The PZEM, DS3231, reed-switch,
+  and WiFi code has only been syntax-checked on a host, and has not been
+  compiled for the ESP32 toolchain in this repository's CI.
+- **The demo data is a replay.** It comes from a public Kaggle inverter
+  dataset, not CTN sensors; see [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md).
+- **Device keys sit in unencrypted NVS** unless flash encryption is enabled.
+  A secure element is the real fix.
+- **V2 contract not yet deployed.** The live contract is V1, which has no
+  on-chain guard against minting one certificate twice (the API enforces it).
+- **No payment split.** The 70/20/10 settlement split in the design is not
+  implemented.
 
 ---
 
