@@ -64,8 +64,8 @@ All three run in CI on every push.
 
 | | Address | Status |
 |---|---|---|
-| **CarbonCreditV2** | [`0x890b…fA1c`](https://amoy.polygonscan.com/address/0x890b51626Cc77E41d83fCaa147CF57955d62fA1c) | Deployed on Amoy. The API switches to it with `CONTRACT_ADDRESS` + `CONTRACT_VERSION=2` |
-| **CarbonCredit (V1)** | [`0x1b4F…7Cf6`](https://amoy.polygonscan.com/address/0x1b4F5A7CEf1c2CFb914A5642CC82F887AB0C7Cf6) | Original contract. Credits minted here stay readable and retirable after the switch |
+| **CarbonCreditV2** | [`0x890b…fA1c`](https://amoy.polygonscan.com/address/0x890b51626Cc77E41d83fCaa147CF57955d62fA1c) | **Live.** New credits are minted here, as ERC-721 tokens with one token per certificate enforced on-chain |
+| **CarbonCredit (V1)** | [`0x1b4F…7Cf6`](https://amoy.polygonscan.com/address/0x1b4F5A7CEf1c2CFb914A5642CC82F887AB0C7Cf6) | Legacy. Credits minted before the move to V2 stay readable and retirable here |
 | **API** | [ctn-api-railway-production.up.railway.app](https://ctn-api-railway-production.up.railway.app/api) | Railway |
 | **Frontend** | [ctn-mvp-complete-j52y.vercel.app](https://ctn-mvp-complete-j52y.vercel.app) | Vercel |
 
@@ -686,7 +686,7 @@ silently running insecure.
 | `CORS_ORIGINS` | Exact frontend origin(s) |
 | `DATABASE_URL` | Must point inside a mounted volume — see below |
 | `PRIVATE_KEY` | Optional; enables minting and retirement |
-| `CONTRACT_VERSION` | `1` for the deployed contract; `2` after deploying CarbonCreditV2 and updating `CONTRACT_ADDRESS` |
+| `CONTRACT_ADDRESS` / `CONTRACT_VERSION` | Where new credits are minted; defaults to CarbonCreditV2 (`2`). `LEGACY_CONTRACT_ADDRESS` is the V1 contract older credits live on |
 | `SPLIT_*_BPS` | Settlement split, default 7000/2000/1000; must total 10000 |
 
 ### Deploying the V2 contracts

@@ -151,23 +151,25 @@ RESERVATION_CLEANUP_INTERVAL_SECONDS = _int("RESERVATION_CLEANUP_INTERVAL_SECOND
 
 # ── Blockchain ─────────────────────────────────────────────────────────────
 
-# The V1 contract every credit minted before any switch lives on. Credits
-# remember the contract they were minted on, so pointing CONTRACT_ADDRESS at a
-# new deployment only changes where new mints go.
+# The original V1 contract. Every credit minted before the move to V2 lives
+# there, and credits remember the contract they were minted on, so they stay
+# readable and retirable after CONTRACT_ADDRESS moved on.
 LEGACY_CONTRACT_ADDRESS = os.getenv(
     "LEGACY_CONTRACT_ADDRESS", "0x1b4F5A7CEf1c2CFb914A5642CC82F887AB0C7Cf6"
 )
-CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS", LEGACY_CONTRACT_ADDRESS)
+# Where new credits are minted: CarbonCreditV2 on Amoy.
+CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS", "0x890b51626Cc77E41d83fCaa147CF57955d62fA1c")
 AMOY_RPC = os.getenv("AMOY_RPC", "https://polygon-amoy-bor-rpc.publicnode.com")
 EXPLORER = os.getenv("EXPLORER", "https://amoy.polygonscan.com")
 
 MINT_GAS_LIMIT = _int("MINT_GAS_LIMIT", 300_000)
 RETIRE_GAS_LIMIT = _int("RETIRE_GAS_LIMIT", 120_000)
 
-# 1 = the CarbonCredit contract deployed at CONTRACT_ADDRESS today.
+# Interface of the contract at CONTRACT_ADDRESS.
 # 2 = CarbonCreditV2 (ERC-721, duplicate-certificate guard, retirement
-#     beneficiary). Set only after deploying V2 and pointing the address at it.
-CONTRACT_VERSION = _int("CONTRACT_VERSION", 1)
+#     beneficiary). 1 = the original CarbonCredit interface, for pointing a
+#     deployment back at a V1 contract.
+CONTRACT_VERSION = _int("CONTRACT_VERSION", 2)
 
 # A mint claim older than this with no broadcast transaction is presumed dead
 # (process restarted before sending) and may be taken over. One that did

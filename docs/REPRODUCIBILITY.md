@@ -93,7 +93,7 @@ All three run in CI on every push.
 | Sensing hardware | PZEM-004T, DS3231, and reed-switch drivers written; firmware crypto verified in CI; **not yet run on a physical board** |
 | Anomaly screening | Night generation, flatlines, robust outliers. Flags for human review, never rejects. |
 | Evidence storage | Self-verifying certificate per credit; pinned byte-exact to IPFS when Pinata is configured |
-| Settlement | V1 deployed on Polygon Amoy. V2 (ERC-721, one token per certificate, retirement beneficiary) tested against the API on a local chain; deployable with the "Deploy contracts" workflow. |
+| Settlement | CarbonCreditV2 (ERC-721, one token per certificate, retirement beneficiary) live on Polygon Amoy at `0x890b51626Cc77E41d83fCaa147CF57955d62fA1c`; the original V1 at `0x1b4F…7Cf6` still serves credits minted before the move. |
 | Payment split | 70/20/10 recorded for every sale in exact integer amounts, and `CTNSettlement` applies it on-chain. Marketplace payments are still simulated, so no funds move yet. |
 | HSM / secure element, decentralised oracle, on-chain device registry | Not implemented |
 | Third-party validation and verification, registry listing | Not undertaken |

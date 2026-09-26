@@ -12,9 +12,9 @@ carries the evidence; neither makes the accounting official.
 
 | Contract | Status | Notes |
 |---|---|---|
-| `CarbonCredit.sol` | Deployed on Amoy at `0x1b4F5A7CEf1c2CFb914A5642CC82F887AB0C7Cf6` | V1. Plain struct registry, single owner key, no guard against minting the same certificate twice. Kept unchanged because it is what the live deployment runs. |
-| `CarbonCreditV2.sol` | Ready to deploy | ERC-721 (`CTN-IR`), one token per certificate, retirement records a beneficiary, retired tokens are frozen, two-step ownership for handing control to a multisig. |
-| `CTNSettlement.sol` | Ready to deploy | Splits each payment 70/20/10 between the seller, treasury, and reserve (fixed at deploy). Pull payments: `settle()` credits balances, `withdraw()` pays them out. Rounding goes to the reserve, so shares always sum to the payment. |
+| `CarbonCredit.sol` | Deployed on Amoy at `0x1b4F5A7CEf1c2CFb914A5642CC82F887AB0C7Cf6` | V1, now legacy. Plain struct registry, single owner key, no on-chain guard against minting the same certificate twice. Kept unchanged because credits minted before the move to V2 still live on it. |
+| `CarbonCreditV2.sol` | **Live** on Amoy at `0x890b51626Cc77E41d83fCaa147CF57955d62fA1c` | ERC-721 (`CTN-IR`), one token per certificate, retirement records a beneficiary, retired tokens are frozen, two-step ownership for handing control to a multisig. |
+| `CTNSettlement.sol` | Not yet deployed (needs treasury and reserve wallets) | Splits each payment 70/20/10 between the seller, treasury, and reserve (fixed at deploy). Pull payments: `settle()` credits balances, `withdraw()` pays them out. Rounding goes to the reserve, so shares always sum to the payment. |
 
 V2 keeps V1's `mintCredit`, `getCredit`, `totalCredits`, `owner`, and
 `CreditMinted` interface, so the API reads and mints against either. Only
